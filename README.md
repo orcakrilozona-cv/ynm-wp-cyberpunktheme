@@ -3,7 +3,7 @@
 > A dark, futuristic WordPress theme with full Elementor compatibility and serious security hardening built in.
 
 **Author:** [Yan Naing Myint](https://yannaing.pro)  
-**Version:** 1.0.0  
+**Version:** 1.0.1  
 **License:** [WTFPL](http://www.wtfpl.net/about/)  
 **Requires WordPress:** 5.8+  
 **Requires PHP:** 7.4+  
@@ -73,18 +73,21 @@ This theme ships with `inc/security.php` — a comprehensive security layer cove
 
 | Vector | Protection |
 |---|---|
-| **XSS** | Recursive URL-decode, null-byte removal, Unicode full-width normalization, `htmlspecialchars(ENT_QUOTES\|ENT_SUBSTITUTE)`, CSP header |
-| **SQL Injection** | No raw queries; `cyberpunk_sanitize_sql_like()` helper; `cyberpunk_detect_code_injection()` pattern scanner |
-| **CSRF** | `wp_nonce_field()` / `wp_verify_nonce()` helpers; AJAX nonce enforcement; `form-action 'self'` in CSP |
-| **RFI** | `allow_url_include=0`, `allow_url_fopen=0` set at runtime; all includes use constants only |
-| **File Upload** | Double-extension bypass detection; `finfo` MIME verification; filename sanitization; path traversal strip |
-| **Code Injection** | Zero `eval()`/`exec()` usage; pattern scanner for PHP tags, JS event handlers, shell metacharacters |
-| **LFI** | `cyberpunk_safe_path()` with `realpath()` canonicalization and base-directory confinement |
-| **Path Disclosure** | `display_errors=0` at runtime; server path scrubbing from error output |
-| **Brute-Force** | Progressive lockout: 2s → 5s → 15-min IP block; global 120 req/min rate limiter; comment/search rate limits |
-| **HTTP Headers** | `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, `HSTS`, full `Content-Security-Policy` |
-| **Session** | `HttpOnly`, `Secure`, `SameSite=Lax` cookie params; `use_strict_mode=1` |
-| **Info Disclosure** | WP version hidden; XML-RPC disabled; user enumeration blocked; generic login errors |
+| **XSS (Reflected / Stored / DOM)** | Recursive URL-decode (catches `%2525` chains); null-byte removal; Unicode full-width normalization (U+FF01–U+FF5E); HTML comment collapse (`<!--...-->` keyword-splitting); CSS `expression()` removal; `htmlspecialchars(ENT_QUOTES\|ENT_SUBSTITUTE)`; full CSP header |
+| **Stored XSS — comment author URL** | `get_comment_author_link()` replaced with safe manual build using `esc_url()` + `esc_html()` + `rel="nofollow ugc noopener noreferrer"` |
+| **XSS — JSON in `<script>` block** | `wp_json_encode()` now uses `JSON_HEX_TAG` flag — encodes `<`/`>` as `\u003C`/`\u003E`, preventing `</script>` injection in schema markup |
+| **SQL Injection** | No raw queries anywhere; `cyberpunk_sanitize_sql_like()` helper wraps `$wpdb->esc_like()`; `cyberpunk_detect_code_injection()` pattern scanner covers UNION SELECT, DROP, EXEC, LOAD_FILE, INTO OUTFILE, comment sequences |
+| **CSRF** | `wp_nonce_field()` / `wp_verify_nonce()` helpers; AJAX nonce enforcement via `cyberpunk_verify_ajax_nonce()`; `form-action 'self'` in CSP |
+| **RFI** | `allow_url_include=0`, `allow_url_fopen=0` set at runtime; all includes use `CYBERPUNK_DIR` constant only; stream wrapper patterns blocked in `cyberpunk_detect_code_injection()` |
+| **Arbitrary File Upload** | Double-extension bypass detection (all extensions in chain checked); expanded dangerous extension blocklist (php3–php9, phtml, phar, asp/aspx, jsp, cfm, cgi, sh, shtml, htaccess, and 30+ more); `finfo`-based MIME verification; filename sanitization; path traversal strip |
+| **SVG Upload XSS** | Post-upload sanitizer strips `<script>`, `on*` event handlers, `javascript:`/`data:` hrefs, `<use>`, `<foreignObject>`, and `<![CDATA[...]]>` sections |
+| **Code Injection** | Zero `eval()`/`exec()` usage; `cyberpunk_detect_code_injection()` covers PHP open tags, dangerous functions (`eval`, `assert`, `system`, `exec`, `passthru`, `shell_exec`, `popen`, `proc_open`, `create_function`), `preg_replace /e`, JS event handlers, CSS `expression()`, hex/octal escape sequences, PHP stream wrappers, shell metacharacters, backtick execution |
+| **LFI / Path Traversal** | `cyberpunk_safe_path()` with recursive URL-decode, Windows UNC path block, encoded backslash block, stream wrapper block, `realpath()` canonicalization, and base-directory confinement |
+| **Path Disclosure** | `display_errors=0` at runtime; `WP_DEBUG_DISPLAY` forced off; server path scrubbing in `wp_die()` handler |
+| **Brute-Force** | `authenticate` filter correct 3-arg signature; progressive lockout: 2s → 5s → 15-min IP block (sha256-keyed transients); global 120 req/min rate limiter; comment rate limit (5/min); search rate limit (20/min) |
+| **HTTP Headers** | `X-Frame-Options: SAMEORIGIN`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy`, `X-XSS-Protection`, `X-Permitted-Cross-Domain-Policies: none`, `HSTS` (HTTPS only), full `Content-Security-Policy` with `upgrade-insecure-requests` |
+| **Session** | `HttpOnly`, `Secure` (HTTPS-conditional), `SameSite=Lax` cookie params; `use_strict_mode=1`; `use_only_cookies=1` |
+| **Info Disclosure** | WP version hidden from head + feeds + asset URLs; XML-RPC disabled; X-Pingback header removed; REST API user enumeration blocked; `/?author=N` enumeration blocked; generic login error messages |
 
 ---
 
@@ -189,6 +192,20 @@ Add `data-typewriter="Your Text"` to any HTML element. Optional attributes:
 ---
 
 ## Changelog
+
+### 1.0.1 — Security Hardening Patch
+- **Brute-force fix:** corrected `authenticate` filter arity from 2 to 3 args — lockout check was silently receiving wrong values
+- **Brute-force fix:** switched transient keys from `md5` to `sha256` in both `cyberpunk_login_fail_handler` and `cyberpunk_check_login_lockout`
+- **XSS:** added HTML comment collapse (`<!--...-->`) to `cyberpunk_sanitize_input` — blocks keyword-splitting evasion (e.g. `<scr<!---->ipt>`)
+- **XSS:** added CSS `expression()` removal to `cyberpunk_sanitize_input` — blocks IE-era code execution via style attributes
+- **Stored XSS:** replaced `get_comment_author_link()` with safe manual build using `esc_url()` + `esc_html()` + `rel="nofollow ugc noopener noreferrer"`
+- **Stored XSS:** wrapped `get_comment_date()` and `get_comment_time()` in `esc_html()` in `printf` calls
+- **JSON injection:** added `JSON_HEX_TAG` flag to `wp_json_encode()` in schema markup — prevents `</script>` breakout
+- **Code injection:** massively expanded `cyberpunk_detect_code_injection()` — now covers PHP dangerous functions, `preg_replace /e`, CSS `expression()`, HTML comment injection, hex/octal escape sequences, PHP stream wrappers, extended SQLi patterns, and SQLi comment sequences; all with pre-normalization (URL-decode + null-byte strip)
+- **File upload:** expanded dangerous extension blocklist from 18 to 45+ entries — added `php8`, `php9`, `shtml`, `shtm`, `stm`, `asa`, `asax`, `ascx`, `ashx`, `asmx`, `axd`, `jsw`, `jsv`, `jspf`, `cfml`, `cfc`, `pyc`, `pyo`, `zsh`, `ksh`, `csh`, `com`, `psm1`, `psd1`, `vbs`, `vbe`, `wsf`, `wsh`, `rb`, `lua`, `htgroups`
+- **SVG upload:** added `<![CDATA[...]]>` stripping — CDATA sections could hide `<script>` content from the previous regex filter
+- **LFI:** added recursive URL-decode, Windows UNC path block (`\\server\share`), encoded backslash block, and PHP stream wrapper block to `cyberpunk_safe_path()`
+- **Path disclosure:** added `WP_DEBUG_DISPLAY` force-off guard — prevents stack traces leaking to browser when `WP_DEBUG=true` in `wp-config.php`
 
 ### 1.0.0
 - Initial release
