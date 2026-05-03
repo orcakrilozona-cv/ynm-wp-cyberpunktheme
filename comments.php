@@ -59,6 +59,9 @@ if ( post_password_required() ) {
     <?php endif; ?>
 
     <?php
+    // Retrieve current commenter data safely before building form fields.
+    $commenter = wp_get_current_commenter();
+
     comment_form( array(
         'title_reply'          => esc_html__( 'Send a Transmission', 'cyberpunk-dark' ),
         'title_reply_to'       => esc_html__( 'Reply to %s', 'cyberpunk-dark' ),

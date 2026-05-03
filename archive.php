@@ -25,7 +25,12 @@ get_header();
 
                 <div class="cyber-posts-grid">
                     <?php while ( have_posts() ) : the_post(); ?>
-                        <?php get_template_part( 'template-parts/content', get_post_type() ); ?>
+                        <?php
+                        // Sanitize post type to a slug before using as a template-part suffix
+                        // to prevent path traversal / LFI via a crafted post type name.
+                        $post_type_slug = sanitize_key( get_post_type() );
+                        get_template_part( 'template-parts/content', $post_type_slug );
+                        ?>
                     <?php endwhile; ?>
                 </div>
 

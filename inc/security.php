@@ -77,7 +77,12 @@ function cyberpunk_sanitize_input( $input ) {
     // 1. Remove null bytes (LFI / extension bypass vector).
     $input = str_replace( "\x00", '', $input );
 
-    // 2. Recursive URL-decode until stable (catches %2525 → %25 → % chains).
+    // 2. Collapse HTML comments BEFORE decoding — prevents <scr<!---->ipt> surviving
+    //    the decode step and then matching tag-stripping as a valid tag.
+    $input = preg_replace( '/<!--[\s\S]*?-->/', '', $input );
+
+    // 3. Recursive URL-decode until stable (catches %2525 → %25 → % chains).
+    //    Run after comment collapse so encoded comment sequences are also caught.
     $prev = null;
     $iterations = 0;
     while ( $prev !== $input && $iterations < 10 ) {
@@ -86,8 +91,9 @@ function cyberpunk_sanitize_input( $input ) {
         $iterations++;
     }
 
-    // 3. Normalize full-width Unicode lookalikes to ASCII equivalents.
+    // 4. Normalize full-width Unicode lookalikes to ASCII equivalents.
     //    Covers U+FF01–U+FF5E (fullwidth forms) → ASCII 0x21–0x7E.
+    //    e.g. ＜script＞ → <script> before tag stripping.
     $input = preg_replace_callback(
         '/[\x{FF01}-\x{FF5E}]/u',
         function( $m ) {
@@ -100,16 +106,22 @@ function cyberpunk_sanitize_input( $input ) {
         $input
     );
 
-    // 4. Collapse HTML comments used to split keywords (e.g. <scr<!---->ipt>).
-    $input = preg_replace( '/<!--[\s\S]*?-->/', '', $input );
+    // 5. Normalize HTML entities a second time after Unicode normalization
+    //    (catches &#x3C; &#60; &lt; chains that survive step 4).
+    $input = html_entity_decode( $input, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
 
-    // 5. Remove CSS expression() — IE code execution vector.
+    // 6. Remove CSS expression() — IE code execution vector.
     $input = preg_replace( '/expression\s*\((?:[^)(]*|\((?:[^)(]*|\([^)(]*\))*\))*\)/i', '', $input );
 
-    // 6. Strip HTML tags and decode entities before re-encoding.
-    $input = wp_strip_all_tags( html_entity_decode( $input, ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
+    // 7. Remove base64-encoded payloads used to smuggle code through filters.
+    //    Catches: base64_decode(...), str_rot13(base64_decode(...)), etc.
+    $input = preg_replace( '/base64_decode\s*\(/i', '', $input );
+    $input = preg_replace( '/str_rot13\s*\(/i',     '', $input );
 
-    // 7. Re-encode for safe HTML output.
+    // 8. Strip all HTML/SVG tags (including <svg>, <animate>, <set>, <image>).
+    $input = wp_strip_all_tags( $input );
+
+    // 9. Re-encode for safe HTML output.
     return htmlspecialchars( $input, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' );
 }
 
@@ -178,8 +190,16 @@ function cyberpunk_safe_path( $path, $base_dir ) {
     }
 
     // Ensure the resolved path is still inside the allowed base.
+    // Also allow an exact match ($full === $base_real) so the base dir itself
+    // is a valid return value — the previous check required a trailing separator
+    // which would reject that edge case.
     $base_real = realpath( $base_dir );
-    if ( $base_real === false || strpos( $full, $base_real . DIRECTORY_SEPARATOR ) !== 0 ) {
+    if ( $base_real === false ) {
+        return false;
+    }
+    $in_base = ( $full === $base_real )
+        || ( strpos( $full, $base_real . DIRECTORY_SEPARATOR ) === 0 );
+    if ( ! $in_base ) {
         return false;
     }
 
@@ -257,6 +277,16 @@ function cyberpunk_detect_code_injection( $input ) {
         '/(?:\/\*.*?\*\/|--\s|#\s*$)/m',
         // Null byte injection
         '/\x00/',
+        // base64_decode() chained execution — common obfuscation vector:
+        //   eval(base64_decode(...)), base64_decode(str_rot13(...)), etc.
+        '/base64_decode\s*\(/i',
+        '/str_rot13\s*\(/i',
+        // gzinflate / gzuncompress — used to hide payloads in compressed strings.
+        '/gz(?:inflate|uncompress|decode)\s*\(/i',
+        // Obfuscated variable function calls: $a = 'system'; $a('id');
+        '/\$\w+\s*\(\s*[\'"][^\'"]*[\'"]\s*\)/i',
+        // Heredoc/nowdoc with dangerous content (<<<EOT ... EOT).
+        '/<<<\s*[\'"]?\w+[\'"]?/i',
     );
 
     foreach ( $patterns as $pattern ) {
@@ -368,7 +398,23 @@ function cyberpunk_validate_upload( $file ) {
         }
     }
 
-    // 7. Sanitize filename — keep only safe characters.
+    // 7. For image types, verify the file is a genuine image using getimagesize().
+    //    This defeats polyglot files (e.g. a PHP webshell with a valid GIF89a header)
+    //    that pass finfo MIME detection but are not real images.
+    $image_extensions = array( 'jpg', 'jpeg', 'png', 'gif', 'webp' );
+    if ( in_array( $final_ext, $image_extensions, true ) ) {
+        $image_info = @getimagesize( $file['tmp_name'] );
+        if ( false === $image_info ) {
+            return false; // Not a valid image — reject.
+        }
+        // Cross-check: finfo MIME must match what getimagesize() reports.
+        $mime_from_image = image_type_to_mime_type( $image_info[2] );
+        if ( function_exists( 'finfo_open' ) && isset( $real_mime ) && $real_mime !== $mime_from_image ) {
+            return false; // MIME mismatch between finfo and image header — reject.
+        }
+    }
+
+    // 8. Sanitize filename — keep only safe characters.
     $safe_name = preg_replace( '/[^a-zA-Z0-9._-]/', '_', basename( $name ) );
     $file['name'] = $safe_name;
 
@@ -569,7 +615,8 @@ function cyberpunk_global_rate_limit() {
     }
 
     $ip      = cyberpunk_get_client_ip();
-    $key     = 'cyber_rl_global_' . md5( $ip );
+    // sha256 instead of md5: collision-resistant, no length-extension risk.
+    $key     = 'cyber_rl_global_' . substr( hash( 'sha256', $ip ), 0, 32 );
     $limit   = 120;
     $window  = 60;
     $count   = (int) get_transient( $key );
@@ -593,7 +640,7 @@ add_action( 'init', 'cyberpunk_global_rate_limit', 5 );
  */
 function cyberpunk_rate_limit_comments( $commentdata ) {
     $ip      = cyberpunk_get_client_ip();
-    $key     = 'cyber_rl_comment_' . md5( $ip );
+    $key     = 'cyber_rl_comment_' . substr( hash( 'sha256', $ip ), 0, 32 );
     $count   = (int) get_transient( $key );
 
     if ( $count >= 5 ) {
@@ -616,7 +663,7 @@ function cyberpunk_rate_limit_search() {
         return;
     }
     $ip    = cyberpunk_get_client_ip();
-    $key   = 'cyber_rl_search_' . md5( $ip );
+    $key   = 'cyber_rl_search_' . substr( hash( 'sha256', $ip ), 0, 32 );
     $count = (int) get_transient( $key );
 
     if ( $count >= 20 ) {
@@ -771,7 +818,192 @@ add_filter( 'wp_die_handler', function( $handler ) {
 } );
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   SECTION 9 — UTILITY FUNCTIONS
+   SECTION 9 — EXTENDED HARDENING (REST, XML-RPC, POST flood, outbound HTTP)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * REST API — require authentication for all write operations from unauthenticated
+ * clients. Read-only GET requests are allowed; anything else (POST/PUT/PATCH/DELETE)
+ * must carry a valid WordPress authentication cookie or Application Password.
+ *
+ * This closes the gap where cyberpunk_verify_ajax_nonce() is defined but not
+ * automatically applied to REST endpoints — REST uses its own auth pipeline.
+ *
+ * Note: WordPress core REST endpoints that require auth already enforce it.
+ * This filter adds a belt-and-suspenders block for any custom endpoints that
+ * might accidentally omit the permission_callback.
+ */
+function cyberpunk_rest_require_auth( $result ) {
+    // If another filter already returned an error, pass it through.
+    if ( is_wp_error( $result ) ) {
+        return $result;
+    }
+
+    // Allow read-only requests from anyone.
+    $method = isset( $_SERVER['REQUEST_METHOD'] )
+        ? strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) )
+        : 'GET';
+
+    if ( in_array( $method, array( 'GET', 'HEAD', 'OPTIONS' ), true ) ) {
+        return $result;
+    }
+
+    // For write methods, require an authenticated user.
+    if ( ! is_user_logged_in() ) {
+        return new WP_Error(
+            'rest_not_logged_in',
+            esc_html__( 'Authentication required for this request.', 'cyberpunk-dark' ),
+            array( 'status' => 401 )
+        );
+    }
+
+    return $result;
+}
+add_filter( 'rest_authentication_errors', 'cyberpunk_rest_require_auth', 99 );
+
+/**
+ * XML-RPC early block — belt-and-suspenders on top of the xmlrpc_enabled filter.
+ *
+ * The xmlrpc_enabled filter fires after the XML-RPC request has been parsed,
+ * meaning system.multicall brute-force attempts still consume server resources.
+ * This action fires on the xmlrpc_call hook (before method execution) and
+ * terminates any call that reaches this point, since XML-RPC should be fully
+ * disabled. Also blocks the xmlrpc.php entry point at the init level.
+ */
+function cyberpunk_block_xmlrpc_calls( $method ) {
+    wp_die(
+        esc_html__( 'XML-RPC is disabled on this site.', 'cyberpunk-dark' ),
+        esc_html__( 'Forbidden', 'cyberpunk-dark' ),
+        array( 'response' => 403 )
+    );
+}
+add_action( 'xmlrpc_call', 'cyberpunk_block_xmlrpc_calls' );
+
+/**
+ * Block direct access to xmlrpc.php at the init level.
+ * Catches requests that bypass the xmlrpc_enabled filter (e.g. direct file access
+ * when WordPress is loaded via xmlrpc.php directly).
+ */
+function cyberpunk_block_xmlrpc_direct() {
+    if ( defined( 'XMLRPC_REQUEST' ) && XMLRPC_REQUEST ) {
+        wp_die(
+            esc_html__( 'XML-RPC is disabled on this site.', 'cyberpunk-dark' ),
+            esc_html__( 'Forbidden', 'cyberpunk-dark' ),
+            array( 'response' => 403 )
+        );
+    }
+}
+add_action( 'init', 'cyberpunk_block_xmlrpc_direct', 1 );
+
+/**
+ * POST flood rate-limiter — limits all POST requests to 30 per minute per IP.
+ *
+ * Covers brute-force vectors that bypass the login-specific lockout:
+ *  - wp-comments-post.php direct POST floods
+ *  - wp-login.php credential stuffing with varied nonces
+ *  - Custom form submission floods
+ *
+ * Excludes admin and cron. Applied at priority 1 on 'init' so it fires
+ * before any form processing hooks.
+ */
+function cyberpunk_post_flood_limit() {
+    if ( ! isset( $_SERVER['REQUEST_METHOD'] ) ) {
+        return;
+    }
+    if ( strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) ) !== 'POST' ) {
+        return;
+    }
+    // Skip admin and cron — they have their own auth layers.
+    if ( is_admin() || ( defined( 'DOING_CRON' ) && DOING_CRON ) ) {
+        return;
+    }
+
+    $ip    = cyberpunk_get_client_ip();
+    $key   = 'cyber_rl_post_' . substr( hash( 'sha256', $ip ), 0, 32 );
+    $limit = 30;
+    $count = (int) get_transient( $key );
+
+    if ( $count >= $limit ) {
+        status_header( 429 );
+        header( 'Retry-After: 60' );
+        wp_die(
+            esc_html__( 'Too many requests. Please slow down.', 'cyberpunk-dark' ),
+            esc_html__( 'Rate Limit Exceeded', 'cyberpunk-dark' ),
+            array( 'response' => 429 )
+        );
+    }
+
+    set_transient( $key, $count + 1, 60 );
+}
+add_action( 'init', 'cyberpunk_post_flood_limit', 1 );
+
+/**
+ * Outbound HTTP request allowlist — restricts WordPress's wp_remote_*() functions
+ * to a known set of trusted domains.
+ *
+ * This prevents Server-Side Request Forgery (SSRF) and RFI via WordPress's own
+ * HTTP API (used by plugins, themes, and core update checks). Requests to
+ * non-allowlisted hosts are blocked before the TCP connection is made.
+ *
+ * The allowlist includes:
+ *  - WordPress.org (core updates, plugin/theme API)
+ *  - Google Fonts (used by this theme)
+ *  - Gravatar (comment avatars)
+ *
+ * To add your own trusted domains, filter 'cyberpunk_allowed_http_hosts'.
+ *
+ * @param  array  $parsed_args Request arguments.
+ * @param  string $url         The request URL.
+ * @return array               Modified args (with 'reject' flag if blocked).
+ */
+function cyberpunk_restrict_outbound_http( $parsed_args, $url ) {
+    // Default allowlist — extend via filter, not by editing this function.
+    $allowed_hosts = apply_filters( 'cyberpunk_allowed_http_hosts', array(
+        'api.wordpress.org',
+        'downloads.wordpress.org',
+        'plugins.svn.wordpress.org',
+        'themes.svn.wordpress.org',
+        'wordpress.org',
+        'fonts.googleapis.com',
+        'fonts.gstatic.com',
+        'secure.gravatar.com',
+        'www.gravatar.com',
+    ) );
+
+    $parsed_url = wp_parse_url( $url );
+    $host       = isset( $parsed_url['host'] ) ? strtolower( $parsed_url['host'] ) : '';
+
+    if ( empty( $host ) ) {
+        // Malformed URL — block it.
+        $parsed_args['reject_unsafe_urls'] = true;
+        return $parsed_args;
+    }
+
+    // Check exact match or subdomain match against each allowed host.
+    $allowed = false;
+    foreach ( $allowed_hosts as $allowed_host ) {
+        $allowed_host = strtolower( $allowed_host );
+        if ( $host === $allowed_host || substr( $host, -( strlen( $allowed_host ) + 1 ) ) === '.' . $allowed_host ) {
+            $allowed = true;
+            break;
+        }
+    }
+
+    if ( ! $allowed ) {
+        // Log the blocked request for audit purposes (no sensitive data in log).
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+        error_log( sprintf( '[CyberPunk Security] Blocked outbound HTTP request to: %s', esc_url_raw( $url ) ) );
+
+        // Setting reject_unsafe_urls causes WP_HTTP to abort the request.
+        $parsed_args['reject_unsafe_urls'] = true;
+    }
+
+    return $parsed_args;
+}
+add_filter( 'http_request_args', 'cyberpunk_restrict_outbound_http', 10, 2 );
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   SECTION 10 — UTILITY FUNCTIONS
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 /**

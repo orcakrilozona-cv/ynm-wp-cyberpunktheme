@@ -19,7 +19,7 @@ get_header();
                     <!-- Post header -->
                     <header class="entry-header cyber-entry-header">
                         <?php cyberpunk_post_categories(); ?>
-                        <h1 class="entry-title cyber-entry-title"><?php the_title(); ?></h1>
+                        <h1 class="entry-title cyber-entry-title"><?php echo esc_html( get_the_title() ); ?></h1>
                         <div class="entry-meta cyber-entry-meta">
                             <?php cyberpunk_post_meta(); ?>
                         </div>

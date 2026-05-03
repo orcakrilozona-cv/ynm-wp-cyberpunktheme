@@ -39,7 +39,7 @@
 
                     <div class="cyber-footer-copy">
                         <span class="cyber-footer-copy-text">
-                            &copy; <?php echo esc_html( date( 'Y' ) ); ?>
+                            &copy; <?php echo esc_html( wp_date( 'Y' ) ); ?>
                             <a href="<?php echo esc_url( home_url( '/' ) ); ?>" class="cyber-footer-site-link">
                                 <?php echo esc_html( get_bloginfo( 'name' ) ); ?>
                             </a>

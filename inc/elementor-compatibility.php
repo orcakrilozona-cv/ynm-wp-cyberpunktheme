@@ -30,11 +30,20 @@ class CyberPunk_Elementor_Compatibility {
      * Register custom Elementor widgets
      */
     public function register_widgets( $widgets_manager ) {
-        // Load widget files
-        $widget_files = glob( CYBERPUNK_DIR . '/elementor-widgets/*.php' );
+        // Load widget files — validate each resolved path stays inside the
+        // expected directory to prevent path traversal via symlinks or crafted
+        // filenames returned by glob() on misconfigured filesystems.
+        $widget_dir   = realpath( CYBERPUNK_DIR . '/elementor-widgets' );
+        $widget_files = $widget_dir ? glob( $widget_dir . '/*.php' ) : array();
+
         if ( $widget_files ) {
             foreach ( $widget_files as $file ) {
-                require_once $file;
+                // Canonicalize and confirm the file is still inside widget_dir.
+                $real = realpath( $file );
+                if ( false === $real || 0 !== strpos( $real, $widget_dir . DIRECTORY_SEPARATOR ) ) {
+                    continue; // Skip anything that escaped the expected directory.
+                }
+                require_once $real;
             }
         }
     }

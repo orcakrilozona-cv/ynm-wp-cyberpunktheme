@@ -40,8 +40,17 @@ Options -Indexes
     Header always set X-XSS-Protection "1; mode=block"
     Header always set X-Permitted-Cross-Domain-Policies "none"
     Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=()"
-    # Uncomment HSTS only after confirming full HTTPS deployment:
-    # Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+
+    # HSTS — enforces HTTPS for 1 year including subdomains.
+    # Only active when the request arrives over HTTPS (env var set by mod_ssl).
+    # Remove the condition and keep the bare Header directive only after you have
+    # confirmed 100% HTTPS coverage across all subdomains and have a valid cert.
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" env=HTTPS
+
+    # Content-Security-Policy — mirrors the PHP-level CSP in inc/security.php.
+    # 'unsafe-inline' and 'unsafe-eval' are required by Elementor; remove them
+    # once you migrate to nonce-based or hash-based script loading.
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://fonts.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https: blob:; media-src 'self' blob:; connect-src 'self'; frame-src 'self'; frame-ancestors 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; worker-src 'self' blob:; upgrade-insecure-requests"
 </IfModule>
 
 # ── Disable server signature ──────────────────────────────────────────────────

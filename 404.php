@@ -34,7 +34,7 @@ get_header();
                                 <span></span><span></span><span></span>
                             </div>
                             <div class="cyber-terminal-body">
-                                <p class="cyber-terminal-line"><span class="cyber-prompt" aria-hidden="true">&gt;</span> <span class="cyber-cmd">locate --path <span class="cyber-404-url"><?php echo esc_html( $_SERVER['REQUEST_URI'] ?? '' ); ?></span></span></p>
+                                <p class="cyber-terminal-line"><span class="cyber-prompt" aria-hidden="true">&gt;</span> <span class="cyber-cmd">locate --path <span class="cyber-404-url"><?php echo esc_html( cyberpunk_sanitize_input( wp_unslash( $_SERVER['REQUEST_URI'] ?? '' ) ) ); ?></span></span></p>
                                 <p class="cyber-terminal-line cyber-terminal-error"><span class="cyber-prompt" aria-hidden="true">&gt;</span> ERROR: Node not found in network topology</p>
                                 <p class="cyber-terminal-line"><span class="cyber-prompt" aria-hidden="true">&gt;</span> Suggested actions:</p>
                             </div>
