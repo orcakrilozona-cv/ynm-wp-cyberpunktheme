@@ -48,7 +48,7 @@
                             <?php else : ?>
                                 <div class="cyber-logo-text">
                                     <a href="<?php echo esc_url( home_url( '/' ) ); ?>" rel="home" class="cyber-site-title-link">
-                                        <span class="cyber-glitch-text" data-text="<?php bloginfo( 'name' ); ?>"><?php bloginfo( 'name' ); ?></span>
+                                        <span class="cyber-glitch-text" data-text="<?php echo esc_attr( get_bloginfo( 'name' ) ); ?>"><?php bloginfo( 'name' ); ?></span>
                                     </a>
                                 </div>
                             <?php endif; ?>

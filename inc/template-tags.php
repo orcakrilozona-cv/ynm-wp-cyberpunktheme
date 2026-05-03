@@ -128,7 +128,22 @@ function cyberpunk_comment_callback( $comment, $args, $depth ) {
                 <div class="comment-author vcard cyber-comment-author">
                     <?php echo get_avatar( $comment, $args['avatar_size'], '', '', array( 'class' => 'cyber-comment-avatar' ) ); ?>
                     <div class="cyber-comment-author-info">
-                        <?php printf( '<b class="fn">%s</b>', get_comment_author_link( $comment ) ); ?>
+                        <?php
+                        // get_comment_author_link() returns an <a> whose href is the
+                        // user-supplied comment_author_url — not run through esc_url().
+                        // Build the author display safely instead.
+                        $author_url  = get_comment_author_url( $comment );
+                        $author_name = get_comment_author( $comment );
+                        if ( $author_url && 'http://' !== $author_url ) {
+                            printf(
+                                '<b class="fn"><a href="%s" rel="nofollow ugc noopener noreferrer" target="_blank">%s</a></b>',
+                                esc_url( $author_url ),
+                                esc_html( $author_name )
+                            );
+                        } else {
+                            printf( '<b class="fn">%s</b>', esc_html( $author_name ) );
+                        }
+                        ?>
                         <div class="comment-metadata cyber-comment-date">
                             <a href="<?php echo esc_url( get_comment_link( $comment, $args ) ); ?>">
                                 <time datetime="<?php comment_time( 'c' ); ?>">
@@ -136,8 +151,8 @@ function cyberpunk_comment_callback( $comment, $args, $depth ) {
                                     printf(
                                         /* translators: 1: date, 2: time */
                                         esc_html__( '%1$s at %2$s', 'cyberpunk-dark' ),
-                                        get_comment_date( '', $comment ),
-                                        get_comment_time()
+                                        esc_html( get_comment_date( '', $comment ) ),
+                                        esc_html( get_comment_time() )
                                     );
                                     ?>
                                 </time>

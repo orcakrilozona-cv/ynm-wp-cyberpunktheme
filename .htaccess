@@ -31,17 +31,18 @@ Options -Indexes
 
 # ── Security headers (Apache mod_headers) ────────────────────────────────────
 # These complement the PHP-level headers in inc/security.php.
-# Uncomment if mod_headers is available on your server.
+# Active when mod_headers is available (standard on Apache 2.4+).
 
-# <IfModule mod_headers.c>
-#     Header always set X-Frame-Options "SAMEORIGIN"
-#     Header always set X-Content-Type-Options "nosniff"
-#     Header always set Referrer-Policy "strict-origin-when-cross-origin"
-#     Header always set X-XSS-Protection "1; mode=block"
-#     Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
-#     # Uncomment HSTS only after confirming full HTTPS deployment:
-#     # Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
-# </IfModule>
+<IfModule mod_headers.c>
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set X-Permitted-Cross-Domain-Policies "none"
+    Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=()"
+    # Uncomment HSTS only after confirming full HTTPS deployment:
+    # Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+</IfModule>
 
 # ── Disable server signature ──────────────────────────────────────────────────
 ServerSignature Off

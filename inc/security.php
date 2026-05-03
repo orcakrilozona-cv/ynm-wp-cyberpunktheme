@@ -37,8 +37,16 @@ if ( function_exists( 'ini_set' ) ) {
     @ini_set( 'display_startup_errors', '0' );
     @ini_set( 'log_errors',             '1' );
 
+    // Force WP_DEBUG_DISPLAY off even if WP_DEBUG is true in wp-config.php.
+    // This prevents stack traces and file paths leaking to the browser in production.
+    if ( ! defined( 'WP_DEBUG_DISPLAY' ) ) {
+        define( 'WP_DEBUG_DISPLAY', false );
+    }
+    @ini_set( 'display_errors', '0' ); // Belt-and-suspenders: override any WP_DEBUG_DISPLAY=true.
+
     // Session hardening at ini level.
     @ini_set( 'session.cookie_httponly', '1' );
+    @ini_set( 'session.cookie_secure',   is_ssl() ? '1' : '0' ); // Secure flag: HTTPS only.
     @ini_set( 'session.cookie_samesite', 'Lax' );
     @ini_set( 'session.use_strict_mode', '1' );
     @ini_set( 'session.use_only_cookies','1' );
@@ -92,10 +100,16 @@ function cyberpunk_sanitize_input( $input ) {
         $input
     );
 
-    // 4. Strip HTML tags and decode entities before re-encoding.
+    // 4. Collapse HTML comments used to split keywords (e.g. <scr<!---->ipt>).
+    $input = preg_replace( '/<!--[\s\S]*?-->/', '', $input );
+
+    // 5. Remove CSS expression() — IE code execution vector.
+    $input = preg_replace( '/expression\s*\((?:[^)(]*|\((?:[^)(]*|\([^)(]*\))*\))*\)/i', '', $input );
+
+    // 6. Strip HTML tags and decode entities before re-encoding.
     $input = wp_strip_all_tags( html_entity_decode( $input, ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
 
-    // 5. Re-encode for safe HTML output.
+    // 7. Re-encode for safe HTML output.
     return htmlspecialchars( $input, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' );
 }
 
@@ -127,11 +141,32 @@ function cyberpunk_safe_path( $path, $base_dir ) {
     // Remove null bytes.
     $path = str_replace( "\x00", '', $path );
 
-    // Decode URL encoding (catches %2e%2e%2f → ../).
-    $path = rawurldecode( $path );
+    // Recursive URL-decode (catches %2e%2e%2f → ../ and %255c → %5c → \).
+    $prev = null;
+    $i    = 0;
+    while ( $prev !== $path && $i < 5 ) {
+        $prev = $path;
+        $path = rawurldecode( $path );
+        $i++;
+    }
 
-    // Block obvious traversal patterns before realpath.
-    if ( preg_match( '#(\.\.[\\/]|[\\/]\.\.|\.\.[^/\\\\])#', $path ) ) {
+    // Block Windows UNC paths (\\server\share) — can escape realpath on Windows.
+    if ( preg_match( '#^\\\\\\\\#', $path ) ) {
+        return false;
+    }
+
+    // Block encoded backslash variants (%5c, %255c) after decoding.
+    if ( strpos( $path, '\\' ) !== false ) {
+        return false;
+    }
+
+    // Block directory traversal sequences (../, \..\, and standalone ..).
+    if ( preg_match( '#(\.\.[\\/]|[\\/]\.\.|\.\.[^/\\\\]|^\.\.$)#', $path ) ) {
+        return false;
+    }
+
+    // Block PHP stream wrappers in path (php://, phar://, zip://, etc.).
+    if ( preg_match( '#(?:php|phar|zip|glob|data|expect|input|filter)\s*://#i', $path ) ) {
         return false;
     }
 
@@ -153,33 +188,79 @@ function cyberpunk_safe_path( $path, $base_dir ) {
 
 /**
  * Detect code injection patterns in a string.
+ *
+ * Covers evasion techniques including:
+ *  - PHP execution tags and short-open tags
+ *  - JS event handlers (on* attributes)
+ *  - javascript:/vbscript:/data: URI schemes
+ *  - CSS expression() injection
+ *  - HTML comment injection (<!-- --> used to split keywords)
+ *  - Hex/octal escape sequences (\x41, \101) used to bypass keyword filters
+ *  - PHP dangerous functions: eval, assert, system, exec, passthru, shell_exec,
+ *    popen, proc_open, create_function, preg_replace /e modifier
+ *  - Shell metacharacters and backtick execution
+ *  - Common SQLi patterns
+ *  - PHP stream wrapper abuse (php://, data://, phar://, zip://)
+ *
  * Returns true if the string contains dangerous patterns.
  *
  * @param  string $input Input to check.
  * @return bool          True if dangerous content detected.
  */
 function cyberpunk_detect_code_injection( $input ) {
+    if ( ! is_string( $input ) ) {
+        return false;
+    }
+
+    // Normalize before pattern matching: decode URL encoding and strip null bytes.
+    $normalized = str_replace( "\x00", '', $input );
+    $prev = null;
+    $i    = 0;
+    while ( $prev !== $normalized && $i < 5 ) {
+        $prev       = $normalized;
+        $normalized = rawurldecode( $normalized );
+        $i++;
+    }
+
     $patterns = array(
-        // PHP tags
+        // PHP open tags (including short echo <?=)
         '/<\?(?:php|=)/i',
-        // JS event handlers
+        // PHP dangerous functions
+        '/\b(?:eval|assert|system|exec|passthru|shell_exec|popen|proc_open|create_function|call_user_func(?:_array)?)\s*\(/i',
+        // preg_replace with /e modifier (code execution)
+        '/preg_replace\s*\(\s*[\'"].*\/e[\'"\s,]/i',
+        // JS event handlers (on* = ...)
         '/\bon\w+\s*=/i',
-        // javascript: URI
+        // javascript: URI scheme
         '/javascript\s*:/i',
-        // data: URI with script
-        '/data\s*:\s*text\/html/i',
-        // vbscript:
+        // vbscript: URI scheme
         '/vbscript\s*:/i',
-        // Shell metacharacters
-        '/[;&|`$]/',
-        // Backtick execution
-        '/`[^`]*`/',
+        // data: URI with HTML or script content
+        '/data\s*:\s*(?:text\/html|application\/x-www-form-urlencoded|image\/svg)/i',
+        // CSS expression() — IE CSS code execution
+        '/expression\s*\(/i',
+        // HTML comment injection (used to split keywords: <scr<!---->ipt>)
+        '/<!--[\s\S]*?-->/i',
+        // Hex escape sequences (\x41 style) — used to bypass keyword filters
+        '/\\\\x[0-9a-fA-F]{2}/i',
+        // Octal escape sequences (\101 style)
+        '/\\\\[0-7]{2,3}/',
+        // PHP stream wrapper abuse
+        '/(?:php|data|phar|zip|glob|expect|input|filter)\s*:\/\//i',
+        // Shell metacharacters (command chaining/injection)
+        '/(?:^|[^a-zA-Z0-9])[;&|`]/',
+        // Backtick command execution
+        '/`[^`]+`/',
         // Common SQLi patterns
-        '/\b(UNION\s+SELECT|DROP\s+TABLE|INSERT\s+INTO|DELETE\s+FROM|EXEC\s*\(|xp_cmdshell)\b/i',
+        '/\b(?:UNION\s+(?:ALL\s+)?SELECT|DROP\s+(?:TABLE|DATABASE)|INSERT\s+INTO|DELETE\s+FROM|UPDATE\s+\w+\s+SET|EXEC(?:UTE)?\s*\(|xp_cmdshell|LOAD_FILE|INTO\s+(?:OUT|DUMP)FILE)\b/i',
+        // SQLi comment sequences
+        '/(?:\/\*.*?\*\/|--\s|#\s*$)/m',
+        // Null byte injection
+        '/\x00/',
     );
 
     foreach ( $patterns as $pattern ) {
-        if ( preg_match( $pattern, $input ) ) {
+        if ( preg_match( $pattern, $normalized ) ) {
             return true;
         }
     }
@@ -249,10 +330,19 @@ function cyberpunk_validate_upload( $file ) {
     $extensions = array_slice( $parts, 1 ); // Everything after first dot.
 
     // Block if ANY extension in the chain is dangerous.
+    // Includes php8/php9 for future PHP versions, shtml/shtm (SSI execution),
+    // xhtml (can execute on some servers), and rb/lua for scripting runtimes.
     $dangerous = array(
-        'php', 'php3', 'php4', 'php5', 'php7', 'phtml', 'phar',
-        'asp', 'aspx', 'jsp', 'jspx', 'cfm', 'cgi', 'pl', 'py',
-        'sh', 'bash', 'exe', 'bat', 'cmd', 'ps1', 'htaccess', 'htpasswd',
+        'php', 'php3', 'php4', 'php5', 'php7', 'php8', 'php9', 'phtml', 'phar',
+        'asp', 'aspx', 'asa', 'asax', 'ascx', 'ashx', 'asmx', 'axd',
+        'jsp', 'jspx', 'jsw', 'jsv', 'jspf',
+        'cfm', 'cfml', 'cfc',
+        'cgi', 'pl', 'py', 'pyc', 'pyo',
+        'sh', 'bash', 'zsh', 'ksh', 'csh',
+        'exe', 'bat', 'cmd', 'com', 'ps1', 'psm1', 'psd1', 'vbs', 'vbe', 'wsf', 'wsh',
+        'rb', 'lua',
+        'shtml', 'shtm', 'stm',
+        'htaccess', 'htpasswd', 'htgroups',
     );
 
     foreach ( $extensions as $ext ) {
@@ -296,6 +386,70 @@ function cyberpunk_filter_upload( $file ) {
     return $file;
 }
 add_filter( 'wp_handle_upload_prefilter', 'cyberpunk_filter_upload' );
+
+/**
+ * SVG XSS Sanitization — strip dangerous elements from uploaded SVG files.
+ *
+ * SVG is XML and can embed <script>, event handlers (onload=), and
+ * javascript: hrefs, making it a stored XSS vector even when the MIME
+ * type check passes. This hook rewrites the file in-place after upload,
+ * removing all script-capable constructs before WordPress saves it.
+ *
+ * Dangerous constructs removed:
+ *  - <script> … </script> blocks
+ *  - on* event handler attributes (onload, onclick, onerror, etc.)
+ *  - href / xlink:href values starting with javascript: or data:
+ *  - <use> elements (can reference external SVG fragments)
+ *  - <foreignObject> elements (can embed arbitrary HTML)
+ *
+ * @param array $file Uploaded file data (after wp_handle_upload).
+ * @return array      Unchanged file data (sanitization is done in-place).
+ */
+function cyberpunk_sanitize_svg_upload( $file ) {
+    if ( empty( $file['file'] ) ) {
+        return $file;
+    }
+
+    // Only process SVG files.
+    $ext = strtolower( pathinfo( $file['file'], PATHINFO_EXTENSION ) );
+    if ( 'svg' !== $ext ) {
+        return $file;
+    }
+
+    $content = file_get_contents( $file['file'] ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+    if ( false === $content ) {
+        return $file;
+    }
+
+    // 0. Strip CDATA sections — can hide script content from regex-based filters.
+    //    e.g. <![CDATA[ alert(1) ]]> bypasses naive <script> detection.
+    $content = preg_replace( '#<!\[CDATA\[[\s\S]*?\]\]>#i', '', $content );
+
+    // 1. Strip <script> blocks entirely.
+    $content = preg_replace( '#<script[\s\S]*?</script\s*>#i', '', $content );
+
+    // 2. Remove on* event handler attributes.
+    $content = preg_replace( '/\s+on\w+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]*)/i', '', $content );
+
+    // 3. Remove javascript: and data: URIs from href / xlink:href.
+    $content = preg_replace(
+        '/(\s+(?:xlink:)?href\s*=\s*["\'])(?:javascript|data)\s*:[^"\']*(["\'])/i',
+        '$1#$2',
+        $content
+    );
+
+    // 4. Remove <use> elements (external SVG fragment injection).
+    $content = preg_replace( '#<use[\s\S]*?/?>#i', '', $content );
+
+    // 5. Remove <foreignObject> elements (arbitrary HTML embedding).
+    $content = preg_replace( '#<foreignObject[\s\S]*?</foreignObject\s*>#i', '', $content );
+
+    // Write sanitized content back.
+    file_put_contents( $file['file'], $content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_read_file_put_contents
+
+    return $file;
+}
+add_filter( 'wp_handle_upload', 'cyberpunk_sanitize_svg_upload' );
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    SECTION 4 — CSRF ENFORCEMENT (Global POST protection)
@@ -360,7 +514,7 @@ function cyberpunk_verify_ajax_nonce() {
  */
 function cyberpunk_login_fail_handler( $username ) {
     $ip      = cyberpunk_get_client_ip();
-    $key     = 'cyber_bf_' . md5( $ip );
+    $key     = 'cyber_bf_' . substr( hash( 'sha256', $ip ), 0, 16 );
     $count   = (int) get_transient( $key );
     $count++;
 
@@ -385,9 +539,9 @@ add_action( 'wp_login_failed', 'cyberpunk_login_fail_handler' );
 /**
  * Block login attempts while IP is locked out (before password check).
  */
-function cyberpunk_check_login_lockout( $user, $password ) {
+function cyberpunk_check_login_lockout( $user, $username, $password ) {
     $ip    = cyberpunk_get_client_ip();
-    $key   = 'cyber_bf_' . md5( $ip );
+    $key   = 'cyber_bf_' . substr( hash( 'sha256', $ip ), 0, 16 );
     $count = (int) get_transient( $key );
 
     if ( $count >= 10 ) {
@@ -398,7 +552,7 @@ function cyberpunk_check_login_lockout( $user, $password ) {
     }
     return $user;
 }
-add_filter( 'authenticate', 'cyberpunk_check_login_lockout', 1, 2 );
+add_filter( 'authenticate', 'cyberpunk_check_login_lockout', 1, 3 );
 
 /**
  * Global HTTP request rate limiter.
@@ -590,22 +744,30 @@ add_filter( 'login_errors', function() {
     return esc_html__( 'Authentication failed. Please check your credentials.', 'cyberpunk-dark' );
 } );
 
-// Scrub server paths from error messages shown to users.
-function cyberpunk_scrub_error_paths( $message ) {
-    $paths = array(
-        ABSPATH,
-        WP_CONTENT_DIR,
-        get_template_directory(),
-        dirname( ABSPATH ),
-    );
-    foreach ( $paths as $path ) {
-        $message = str_replace( $path, '[path]', $message );
-    }
-    return $message;
-}
+/**
+ * Scrub absolute server paths from wp_die() messages to prevent path disclosure.
+ * Wraps the default handler and replaces known filesystem paths with '[path]'.
+ *
+ * @param  callable $handler The default wp_die handler.
+ * @return callable          A wrapped handler that scrubs paths first.
+ */
 add_filter( 'wp_die_handler', function( $handler ) {
-    // Wrap the default handler to scrub paths from messages.
-    return $handler;
+    return function( $message, $title = '', $args = array() ) use ( $handler ) {
+        if ( is_string( $message ) ) {
+            $paths = array(
+                ABSPATH,
+                WP_CONTENT_DIR,
+                get_template_directory(),
+                dirname( ABSPATH ),
+            );
+            foreach ( $paths as $path ) {
+                if ( $path ) {
+                    $message = str_replace( $path, '[path]', $message );
+                }
+            }
+        }
+        call_user_func( $handler, $message, $title, $args );
+    };
 } );
 
 /* ═══════════════════════════════════════════════════════════════════════════════

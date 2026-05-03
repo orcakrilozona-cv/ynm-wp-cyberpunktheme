@@ -41,7 +41,7 @@
                         <span class="cyber-footer-copy-text">
                             &copy; <?php echo esc_html( date( 'Y' ) ); ?>
                             <a href="<?php echo esc_url( home_url( '/' ) ); ?>" class="cyber-footer-site-link">
-                                <?php bloginfo( 'name' ); ?>
+                                <?php echo esc_html( get_bloginfo( 'name' ) ); ?>
                             </a>
                         </span>
                         <span class="cyber-footer-sep" aria-hidden="true"> // </span>

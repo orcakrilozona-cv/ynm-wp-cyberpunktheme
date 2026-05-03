@@ -17,7 +17,7 @@ get_header();
                 <header class="page-header cyber-page-header cyber-archive-header">
                     <div class="cyber-archive-header-inner">
                         <?php
-                        the_archive_title( '<h1 class="page-title cyber-page-title cyber-glitch-text" data-text="' . strip_tags( get_the_archive_title() ) . '">', '</h1>' );
+                        the_archive_title( '<h1 class="page-title cyber-page-title cyber-glitch-text" data-text="' . esc_attr( wp_strip_all_tags( get_the_archive_title() ) ) . '">', '</h1>' );
                         the_archive_description( '<div class="archive-description cyber-archive-desc">', '</div>' );
                         ?>
                     </div>

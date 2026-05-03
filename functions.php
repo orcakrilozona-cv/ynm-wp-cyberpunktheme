@@ -241,9 +241,15 @@ function cyberpunk_pagination() {
     ) );
 
     if ( is_array( $pages ) ) {
+        // paginate_links() returns trusted HTML (anchors + spans with numeric content).
+        // wp_kses restricts to the exact tags/attributes it produces.
+        $allowed_pagination = array(
+            'a'    => array( 'href' => array(), 'class' => array(), 'aria-current' => array() ),
+            'span' => array( 'class' => array(), 'aria-current' => array() ),
+        );
         echo '<nav class="cyber-pagination" aria-label="' . esc_attr__( 'Posts navigation', 'cyberpunk-dark' ) . '"><ul>';
         foreach ( $pages as $page ) {
-            echo '<li>' . $page . '</li>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+            echo '<li>' . wp_kses( $page, $allowed_pagination ) . '</li>';
         }
         echo '</ul></nav>';
     }

@@ -125,7 +125,9 @@ function cyberpunk_schema_markup() {
                 'name'  => get_bloginfo( 'name' ),
             ),
         );
-        echo '<script type="application/ld+json">' . wp_json_encode( $schema ) . '</script>' . "\n";
+        // JSON_HEX_TAG encodes < and > as \u003C / \u003E, preventing </script>
+        // injection that could break out of the script block context.
+        echo '<script type="application/ld+json">' . wp_json_encode( $schema, JSON_HEX_TAG | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) . '</script>' . "\n";
     }
 }
 add_action( 'wp_head', 'cyberpunk_schema_markup' );

@@ -87,7 +87,7 @@ get_header();
                                 <?php the_author(); ?>
                             </a>
                         </h3>
-                        <p class="cyber-author-desc"><?php the_author_meta( 'description' ); ?></p>
+                        <p class="cyber-author-desc"><?php echo esc_html( get_the_author_meta( 'description' ) ); ?></p>
                     </div>
                 </div>
                 <?php endif; ?>
