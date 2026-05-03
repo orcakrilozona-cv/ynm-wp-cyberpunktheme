@@ -38,6 +38,17 @@
                 <div class="cyber-footer-bottom-grid">
 
                     <div class="cyber-footer-copy">
+                        <?php
+                        // Output the optional custom footer text set in the Customizer.
+                        // wp_kses_post() enforces the same allowlist used for post content,
+                        // preventing stored XSS while allowing basic formatting tags.
+                        // get_theme_mod() returns '' by default (see inc/customizer.php),
+                        // so the block is invisible until the admin sets a value.
+                        $footer_text = get_theme_mod( 'cyberpunk_footer_text', '' );
+                        if ( $footer_text ) {
+                            echo '<div class="cyber-footer-custom-text">' . wp_kses_post( $footer_text ) . '</div>';
+                        }
+                        ?>
                         <span class="cyber-footer-copy-text">
                             &copy; <?php echo esc_html( wp_date( 'Y' ) ); ?>
                             <a href="<?php echo esc_url( home_url( '/' ) ); ?>" class="cyber-footer-site-link">

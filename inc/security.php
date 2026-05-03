@@ -47,7 +47,7 @@ if ( function_exists( 'ini_set' ) ) {
     // Session hardening at ini level.
     @ini_set( 'session.cookie_httponly', '1' );
     @ini_set( 'session.cookie_secure',   is_ssl() ? '1' : '0' ); // Secure flag: HTTPS only.
-    @ini_set( 'session.cookie_samesite', 'Lax' );
+    @ini_set( 'session.cookie_samesite', 'Strict' ); // FIX: upgraded from Lax to Strict (see Section 7).
     @ini_set( 'session.use_strict_mode', '1' );
     @ini_set( 'session.use_only_cookies','1' );
 }
@@ -60,8 +60,11 @@ if ( function_exists( 'ini_set' ) ) {
  * Deeply sanitize a string against XSS evasion techniques:
  *  - Recursive URL-decoding (catches double/triple encoding: %253C → %3C → <)
  *  - Null-byte removal (\x00 can truncate extension checks)
- *  - Unicode normalization bypass (e.g. ＜ U+FF1C → <)
- *  - HTML entity stripping
+ *  - Unicode normalization bypass (fullwidth U+FF01–FF5E AND \uXXXX JS escapes)
+ *  - HTML entity stripping (including &#x3C; &#60; &lt; chains)
+ *  - HTML comment injection collapse (<scr<!---->ipt>)
+ *  - CSS expression() removal
+ *  - base64_decode / str_rot13 obfuscation removal
  *  - htmlspecialchars with ENT_QUOTES|ENT_SUBSTITUTE for output encoding
  *
  * Use this for any user-supplied string that will be output in HTML context.
@@ -91,9 +94,9 @@ function cyberpunk_sanitize_input( $input ) {
         $iterations++;
     }
 
-    // 4. Normalize full-width Unicode lookalikes to ASCII equivalents.
-    //    Covers U+FF01–U+FF5E (fullwidth forms) → ASCII 0x21–0x7E.
-    //    e.g. ＜script＞ → <script> before tag stripping.
+    // 4a. Normalize full-width Unicode lookalikes to ASCII equivalents.
+    //     Covers U+FF01–U+FF5E (fullwidth forms) → ASCII 0x21–0x7E.
+    //     e.g. ＜script＞ → <script> before tag stripping.
     $input = preg_replace_callback(
         '/[\x{FF01}-\x{FF5E}]/u',
         function( $m ) {
@@ -106,24 +109,143 @@ function cyberpunk_sanitize_input( $input ) {
         $input
     );
 
-    // 5. Normalize HTML entities a second time after Unicode normalization
-    //    (catches &#x3C; &#60; &lt; chains that survive step 4).
+    // 4b. Decode \uXXXX JS/JSON Unicode escape sequences.
+    //     Attackers use these in DOM XSS payloads: \u003cscript\u003e → <script>
+    //     Must run AFTER fullwidth normalization so both layers are caught.
+    $input = preg_replace_callback(
+        '/\\\\u([0-9a-fA-F]{4})/i',
+        function( $m ) {
+            $codepoint = hexdec( $m[1] );
+            // Only decode printable ASCII range to avoid introducing control chars.
+            if ( $codepoint >= 0x20 && $codepoint <= 0x7E ) {
+                return chr( $codepoint );
+            }
+            return $m[0]; // Leave non-ASCII codepoints encoded — they are safe.
+        },
+        $input
+    );
+
+    // 4c. Decode HTML character references a second time after Unicode normalization.
+    //     Catches &#x3C; &#60; &lt; chains that survive steps 4a/4b.
     $input = html_entity_decode( $input, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
 
-    // 6. Remove CSS expression() — IE code execution vector.
+    // 4d. Strip CSS injection vectors:
+    //     - expression() with tab/newline whitespace bypass (e.g. expres\tsion\n())
+    //     - url() with javascript: or data: payloads
+    //     - @import directives (can load external stylesheets with payloads)
+    //     Run AFTER entity decode so encoded variants are caught.
+    $input = preg_replace( '/expres+ion[\s\S]{0,10}\(/i', '', $input );
+    $input = preg_replace( '/url\s*\(\s*[\'"]?\s*(?:javascript|data|vbscript)\s*:/i', 'url(', $input );
+    $input = preg_replace( '/@import\b/i', '', $input );
+
+    // 5. Remove CSS expression() — IE code execution vector (original pattern kept
+    //    as belt-and-suspenders after the broader strip in step 4d).
     $input = preg_replace( '/expression\s*\((?:[^)(]*|\((?:[^)(]*|\([^)(]*\))*\))*\)/i', '', $input );
 
-    // 7. Remove base64-encoded payloads used to smuggle code through filters.
-    //    Catches: base64_decode(...), str_rot13(base64_decode(...)), etc.
+    // 6. Remove base64-encoded payloads used to smuggle code through filters.
     $input = preg_replace( '/base64_decode\s*\(/i', '', $input );
     $input = preg_replace( '/str_rot13\s*\(/i',     '', $input );
 
-    // 8. Strip all HTML/SVG tags (including <svg>, <animate>, <set>, <image>).
+    // 7. Strip all HTML/SVG tags (including <svg>, <animate>, <set>, <image>).
+    //    wp_strip_all_tags handles <svg/onload> (slash-separated) and
+    //    <img/onerror> variants because it uses a full tag-stripping pass.
     $input = wp_strip_all_tags( $input );
 
-    // 9. Re-encode for safe HTML output.
+    // 8. Re-encode for safe HTML output.
     return htmlspecialchars( $input, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' );
 }
+
+/**
+ * Global request input sanitization — applies cyberpunk_sanitize_input() and
+ * cyberpunk_detect_code_injection() to all incoming GET/POST/COOKIE superglobals
+ * before WordPress processes them.
+ *
+ * This is a defence-in-depth layer. WordPress's own sanitization functions
+ * (sanitize_text_field, esc_html, etc.) are still required at output time.
+ * This layer catches evasion payloads that bypass simple string checks:
+ *  - Double/triple URL encoding (%253C → %3C → <)
+ *  - Unicode fullwidth lookalikes (＜script＞)
+ *  - \uXXXX JS escape sequences
+ *  - Null-byte injection
+ *  - HTML comment splitting (<scr<!---->ipt>)
+ *
+ * Payloads detected by cyberpunk_detect_code_injection() are blocked with 400.
+ * All other inputs are sanitized in-place.
+ *
+ * Exclusions:
+ *  - Admin requests (wp-admin) — handled by WP core + capability checks.
+ *  - AJAX requests — handled per-action by nonce + sanitize_text_field.
+ *  - REST API — handled by schema validation in each endpoint.
+ *  - File upload fields ($_FILES) — handled by cyberpunk_validate_upload().
+ *  - The 'content' and 'comment' fields — these legitimately contain HTML/markup
+ *    and are handled by wp_kses_post() / wp_filter_kses() downstream.
+ */
+function cyberpunk_sanitize_global_inputs() {
+    // Skip admin, AJAX, REST, CLI — they have their own sanitization pipelines.
+    if ( is_admin() ) {
+        return;
+    }
+    if ( defined( 'DOING_AJAX' ) && DOING_AJAX ) {
+        return;
+    }
+    if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
+        return;
+    }
+    if ( defined( 'WP_CLI' ) && WP_CLI ) {
+        return;
+    }
+
+    // Fields that legitimately contain HTML/markup — skip deep sanitization.
+    // These are handled by wp_kses_post() / wp_filter_kses() at output time.
+    $html_fields = array( 'content', 'comment', 'description', 'excerpt', 'post_content' );
+
+    // Process GET, POST, and COOKIE superglobals.
+    $superglobals = array( &$_GET, &$_POST, &$_COOKIE );
+
+    foreach ( $superglobals as &$global ) {
+        if ( ! is_array( $global ) ) {
+            continue;
+        }
+        foreach ( $global as $key => &$value ) {
+            // Skip HTML-content fields.
+            if ( in_array( $key, $html_fields, true ) ) {
+                continue;
+            }
+            if ( is_string( $value ) ) {
+                // Block requests containing code injection patterns.
+                if ( cyberpunk_detect_code_injection( $value ) ) {
+                    status_header( 400 );
+                    wp_die(
+                        esc_html__( 'Bad request: potentially malicious input detected.', 'cyberpunk-dark' ),
+                        esc_html__( 'Bad Request', 'cyberpunk-dark' ),
+                        array( 'response' => 400 )
+                    );
+                }
+                // Sanitize the value in-place.
+                $value = cyberpunk_sanitize_input( $value );
+            } elseif ( is_array( $value ) ) {
+                // Recursively sanitize nested arrays (e.g. $_POST['meta'][0]).
+                array_walk_recursive( $value, function( &$v ) use ( $html_fields ) {
+                    if ( is_string( $v ) ) {
+                        if ( cyberpunk_detect_code_injection( $v ) ) {
+                            status_header( 400 );
+                            wp_die(
+                                esc_html__( 'Bad request: potentially malicious input detected.', 'cyberpunk-dark' ),
+                                esc_html__( 'Bad Request', 'cyberpunk-dark' ),
+                                array( 'response' => 400 )
+                            );
+                        }
+                        $v = cyberpunk_sanitize_input( $v );
+                    }
+                } );
+            }
+        }
+        unset( $value );
+    }
+    unset( $global );
+}
+// Priority 1 — fires before any WordPress hook reads superglobals.
+add_action( 'init', 'cyberpunk_sanitize_global_inputs', 1 );
 
 /**
  * Sanitize a string for safe use in SQL LIKE clauses via $wpdb->prepare().
@@ -177,8 +299,11 @@ function cyberpunk_safe_path( $path, $base_dir ) {
         return false;
     }
 
-    // Block PHP stream wrappers in path (php://, phar://, zip://, etc.).
-    if ( preg_match( '#(?:php|phar|zip|glob|data|expect|input|filter)\s*://#i', $path ) ) {
+    // Block ALL known PHP stream wrappers in path.
+    // Extended from the original pattern to include file://, ssh2://, rar://,
+    // ogg://, zlib://, compress.zlib://, compress.bzip2:// — all of which can
+    // be used to read arbitrary files or make network connections via include/fopen.
+    if ( preg_match( '#(?:php|phar|zip|glob|data|expect|input|filter|file|ssh2|rar|ogg|zlib|compress\.zlib|compress\.bzip2)\s*://#i', $path ) ) {
         return false;
     }
 
@@ -245,44 +370,85 @@ function cyberpunk_detect_code_injection( $input ) {
     $patterns = array(
         // PHP open tags (including short echo <?=)
         '/<\?(?:php|=)/i',
-        // PHP dangerous functions
+
+        // PHP dangerous functions — code execution
         '/\b(?:eval|assert|system|exec|passthru|shell_exec|popen|proc_open|create_function|call_user_func(?:_array)?)\s*\(/i',
+        // Additional dangerous PHP functions missed in previous pass:
+        //   pcntl_exec — execute a program (bypasses open_basedir)
+        //   dl()       — load a PHP extension at runtime
+        //   posix_kill — send signals to processes
+        //   ReflectionFunction — can invoke arbitrary callables via reflection
+        //   array_map/array_filter/usort with callable string — indirect code exec
+        '/\b(?:pcntl_exec|dl|posix_kill|posix_mkfifo|posix_setuid)\s*\(/i',
+        '/\b(?:ReflectionFunction|ReflectionMethod|ReflectionClass)\s*\(/i',
+        '/\b(?:array_map|array_filter|array_walk|usort|uasort|uksort|array_reduce)\s*\(\s*[^,]+,\s*[\'"][^\'"]+[\'"]/i',
+
         // preg_replace with /e modifier (code execution)
         '/preg_replace\s*\(\s*[\'"].*\/e[\'"\s,]/i',
-        // JS event handlers (on* = ...)
+
+        // JS event handlers (on* = ...) — covers all HTML event attributes
         '/\bon\w+\s*=/i',
+        // Interaction-free XSS vectors: <details open ontoggle>, <marquee onstart>,
+        // <body onpageshow>, <svg onload> — caught by the on\w+ pattern above.
+        // srcdoc attribute — iframe srcdoc XSS (executes HTML without src URL)
+        '/\bsrcdoc\s*=/i',
+        // formaction attribute — overrides form action, can bypass CSP form-action
+        '/\bformaction\s*=/i',
+
         // javascript: URI scheme
         '/javascript\s*:/i',
         // vbscript: URI scheme
         '/vbscript\s*:/i',
         // data: URI with HTML or script content
         '/data\s*:\s*(?:text\/html|application\/x-www-form-urlencoded|image\/svg)/i',
+
         // CSS expression() — IE CSS code execution
         '/expression\s*\(/i',
+        // CSS @import — can load external stylesheets containing payloads
+        '/@import\b/i',
+        // CSS url() with dangerous scheme
+        '/url\s*\(\s*[\'"]?\s*(?:javascript|data|vbscript)\s*:/i',
+
         // HTML comment injection (used to split keywords: <scr<!---->ipt>)
         '/<!--[\s\S]*?-->/i',
+
         // Hex escape sequences (\x41 style) — used to bypass keyword filters
         '/\\\\x[0-9a-fA-F]{2}/i',
         // Octal escape sequences (\101 style)
         '/\\\\[0-7]{2,3}/',
-        // PHP stream wrapper abuse
-        '/(?:php|data|phar|zip|glob|expect|input|filter)\s*:\/\//i',
+
+        // PHP stream wrapper abuse (LFI/RFI vectors)
+        // Extended to cover file://, ssh2://, rar://, ogg://, zlib:// wrappers
+        // that were missing from the previous pattern.
+        '/(?:php|data|phar|zip|glob|expect|input|filter|file|ssh2|rar|ogg|zlib|compress\.zlib|compress\.bzip2)\s*:\/\//i',
+
         // Shell metacharacters (command chaining/injection)
         '/(?:^|[^a-zA-Z0-9])[;&|\x60]/',
         // Backtick command execution
         '/\x60[^\x60]+\x60/',
-        // Common SQLi patterns
+
+        // SQL Injection — destructive / exfiltration patterns
         '/\b(?:UNION\s+(?:ALL\s+)?SELECT|DROP\s+(?:TABLE|DATABASE)|INSERT\s+INTO|DELETE\s+FROM|UPDATE\s+\w+\s+SET|EXEC(?:UTE)?\s*\(|xp_cmdshell|LOAD_FILE|INTO\s+(?:OUT|DUMP)FILE)\b/i',
         // SQLi comment sequences
         '/(?:\/\*.*?\*\/|--\s|#\s*$)/m',
+        // Blind time-based SQLi: SLEEP(), BENCHMARK(), WAITFOR DELAY
+        '/\b(?:SLEEP|BENCHMARK|WAITFOR\s+DELAY|PG_SLEEP)\s*\(/i',
+        // Information schema / version fingerprinting
+        '/\b(?:INFORMATION_SCHEMA|@@version|@@datadir|@@basedir|@@hostname)\b/i',
+        // CHAR() function chains used to bypass string literal filters
+        '/\bCHAR\s*\(\s*\d+/i',
+        // Hex literal injection (0x41 in SQL context)
+        '/\b0x[0-9a-fA-F]{2,}\b/',
+
         // Null byte injection
         '/\x00/',
-        // base64_decode() chained execution — common obfuscation vector:
-        //   eval(base64_decode(...)), base64_decode(str_rot13(...)), etc.
+
+        // base64_decode() chained execution — common obfuscation vector
         '/base64_decode\s*\(/i',
         '/str_rot13\s*\(/i',
         // gzinflate / gzuncompress — used to hide payloads in compressed strings.
         '/gz(?:inflate|uncompress|decode)\s*\(/i',
+
         // Obfuscated variable function calls: $a = 'system'; $a('id');
         '/\$\w+\s*\(\s*[\'"][^\'"]*[\'"]\s*\)/i',
         // Heredoc/nowdoc with dangerous content (<<<EOT ... EOT).
@@ -580,14 +746,26 @@ function cyberpunk_csrf_field( $action = 'cyberpunk_form' ) {
 }
 
 /**
- * Verify a CSRF nonce. Dies with 403 on failure.
+ * Verify a CSRF nonce for POST requests only. Dies with 403 on failure.
+ *
+ * FIX: Previously read from $_REQUEST, which merges GET + POST + COOKIE.
+ * An attacker could deliver a valid nonce via a GET parameter on a crafted
+ * URL, satisfying the nonce check for a state-changing POST form — a CSRF
+ * bypass via GET-based nonce delivery.
+ *
+ * Fix: Read exclusively from $_POST so the nonce can only arrive in the
+ * request body, not in the URL. This is consistent with how WordPress core
+ * handles nonce verification for form submissions (check_admin_referer uses
+ * $_REQUEST but WordPress forms always POST the nonce field).
+ *
  * Resistant to timing attacks via wp_verify_nonce's constant-time comparison.
  *
  * @param string $action Nonce action name.
  */
 function cyberpunk_verify_csrf( $action = 'cyberpunk_form' ) {
-    $nonce = isset( $_REQUEST['_cyberpunk_nonce'] )
-        ? sanitize_text_field( wp_unslash( $_REQUEST['_cyberpunk_nonce'] ) )
+    // Only accept nonce from POST body — not from GET or COOKIE.
+    $nonce = isset( $_POST['_cyberpunk_nonce'] )
+        ? sanitize_text_field( wp_unslash( $_POST['_cyberpunk_nonce'] ) )
         : '';
 
     if ( ! wp_verify_nonce( $nonce, sanitize_key( $action ) ) ) {
@@ -603,6 +781,12 @@ function cyberpunk_verify_csrf( $action = 'cyberpunk_form' ) {
  * Enforce CSRF nonce on all theme-specific AJAX POST actions.
  * WordPress core already protects its own AJAX with check_ajax_referer().
  * This adds a layer for any custom theme AJAX handlers.
+ *
+ * FIX: Hook this function to every custom wp_ajax_* action so it actually
+ * runs. Previously it was defined but never attached to any action hook,
+ * meaning custom AJAX endpoints had no CSRF protection at all.
+ * Usage in your AJAX handler: add_action( 'wp_ajax_my_action', 'cyberpunk_verify_ajax_nonce' );
+ * or call cyberpunk_verify_ajax_nonce() as the first line of each handler.
  */
 function cyberpunk_verify_ajax_nonce() {
     $nonce = isset( $_POST['nonce'] )
@@ -614,6 +798,33 @@ function cyberpunk_verify_ajax_nonce() {
         wp_die();
     }
 }
+
+/**
+ * Auto-apply CSRF nonce verification to all theme-prefixed AJAX actions.
+ *
+ * Any action registered as 'wp_ajax_cyberpunk_*' or
+ * 'wp_ajax_nopriv_cyberpunk_*' will have the nonce checked before the
+ * handler runs. This closes the gap where cyberpunk_verify_ajax_nonce()
+ * was defined but never automatically applied.
+ */
+function cyberpunk_auto_verify_ajax_nonce() {
+    // Only fire on AJAX requests.
+    if ( ! ( defined( 'DOING_AJAX' ) && DOING_AJAX ) ) {
+        return;
+    }
+
+    $action = isset( $_REQUEST['action'] )
+        ? sanitize_key( wp_unslash( $_REQUEST['action'] ) )
+        : '';
+
+    // Only intercept theme-prefixed actions.
+    if ( 0 !== strpos( $action, 'cyberpunk_' ) ) {
+        return;
+    }
+
+    cyberpunk_verify_ajax_nonce();
+}
+add_action( 'init', 'cyberpunk_auto_verify_ajax_nonce', 2 );
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    SECTION 5 — BRUTE-FORCE PROTECTION + HTTP RATE LIMITING
@@ -800,16 +1011,48 @@ function cyberpunk_harden_session() {
     if ( headers_sent() ) {
         return;
     }
+    // FIX: Upgraded SameSite from 'Lax' to 'Strict'.
+    // 'Lax' allows cookies to be sent on top-level cross-site GET navigations
+    // (e.g. a link from an external site), which is sufficient for CSRF on
+    // state-changing GET endpoints. 'Strict' prevents the cookie from being
+    // sent on ANY cross-site request, eliminating that vector entirely.
+    // WordPress itself does not rely on cross-site cookie delivery for its
+    // front-end session, so 'Strict' is safe here.
     session_set_cookie_params( array(
         'lifetime' => 0,
         'path'     => defined( 'COOKIEPATH' ) ? COOKIEPATH : '/',
         'domain'   => defined( 'COOKIE_DOMAIN' ) ? COOKIE_DOMAIN : '',
         'secure'   => is_ssl(),
         'httponly' => true,
-        'samesite' => 'Lax',
+        'samesite' => 'Strict',
     ) );
 }
 add_action( 'init', 'cyberpunk_harden_session', 1 );
+
+/**
+ * Session fixation prevention — regenerate the session ID on login.
+ *
+ * Without this, an attacker can pre-set a known session ID (e.g. via a
+ * Set-Cookie injection or network sniffing), wait for the victim to log in,
+ * and then use that same ID to hijack the authenticated session.
+ *
+ * session_regenerate_id(true) issues a new ID AND deletes the old session
+ * data, so the pre-set ID becomes invalid immediately after login.
+ *
+ * WordPress uses its own auth cookie system (not PHP sessions) for most
+ * authentication, but any plugin or theme code that calls session_start()
+ * is vulnerable without this hook.
+ *
+ * @param string $user_login The username of the logged-in user.
+ * @param WP_User $user      The WP_User object.
+ */
+function cyberpunk_regenerate_session_on_login( $user_login, $user ) {
+    if ( session_status() === PHP_SESSION_ACTIVE ) {
+        // Delete old session data and issue a new session ID.
+        session_regenerate_id( true );
+    }
+}
+add_action( 'wp_login', 'cyberpunk_regenerate_session_on_login', 10, 2 );
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    SECTION 8 — INFORMATION DISCLOSURE HARDENING
@@ -838,9 +1081,13 @@ function cyberpunk_remove_x_pingback( $headers ) {
 }
 add_filter( 'wp_headers', 'cyberpunk_remove_x_pingback' );
 
-// Block REST API user enumeration for unauthenticated requests.
+// Block REST API user enumeration for ALL requests (authenticated and not).
+// A logged-in subscriber has no legitimate need to list all users via REST.
+// Admins and editors who need this can use the WP admin UI directly.
+// FIX: previously only blocked unauthenticated requests — a logged-in subscriber
+// could still enumerate all usernames/emails via GET /wp/v2/users.
 function cyberpunk_disable_rest_user_enum( $endpoints ) {
-    if ( ! is_user_logged_in() ) {
+    if ( ! current_user_can( 'list_users' ) ) {
         unset( $endpoints['/wp/v2/users'] );
         unset( $endpoints['/wp/v2/users/(?P<id>[\d]+)'] );
     }
@@ -874,16 +1121,25 @@ add_filter( 'login_errors', function() {
 add_filter( 'wp_die_handler', function( $handler ) {
     return function( $message, $title = '', $args = array() ) use ( $handler ) {
         if ( is_string( $message ) ) {
-            $paths = array(
+            // FIX: Expanded path list to cover additional disclosure vectors:
+            //  - sys_get_temp_dir()         — PHP temp directory (e.g. /tmp)
+            //  - ini_get('upload_tmp_dir')  — upload temp dir if different from sys temp
+            //  - $_SERVER['DOCUMENT_ROOT']  — web root path
+            // These paths can appear in stack traces and error messages when
+            // file operations fail, revealing server filesystem layout.
+            $paths = array_filter( array_unique( array(
                 ABSPATH,
                 WP_CONTENT_DIR,
                 get_template_directory(),
                 dirname( ABSPATH ),
-            );
+                sys_get_temp_dir(),
+                (string) ini_get( 'upload_tmp_dir' ),
+                isset( $_SERVER['DOCUMENT_ROOT'] )
+                    ? sanitize_text_field( wp_unslash( $_SERVER['DOCUMENT_ROOT'] ) )
+                    : '',
+            ) ) );
             foreach ( $paths as $path ) {
-                if ( $path ) {
-                    $message = str_replace( $path, '[path]', $message );
-                }
+                $message = str_replace( $path, '[path]', $message );
             }
         }
         call_user_func( $handler, $message, $title, $args );
@@ -1098,6 +1354,73 @@ function cyberpunk_abort_blocked_http( $preempt, $args, $url ) {
     return $preempt;
 }
 add_filter( 'pre_http_request', 'cyberpunk_abort_blocked_http', 10, 3 );
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   SECTION 11 — OUTPUT HARDENING (comment text, taxonomy descriptions)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Restrict comment output to a safe HTML subset.
+ *
+ * WordPress core's kses configuration can be widened by plugins, which would
+ * allow stored XSS payloads in approved comments to execute. This filter
+ * applies a theme-level allowlist that is independent of any plugin changes.
+ *
+ * Allowed tags: the minimal set needed for readable comment text.
+ *  - Inline formatting: <a>, <b>, <i>, <em>, <strong>, <code>, <s>, <del>, <ins>
+ *  - Block: <p>, <blockquote>, <ul>, <ol>, <li>
+ *  - Line break: <br>
+ *
+ * @param  string $comment_text Filtered comment text from WP core.
+ * @return string               Re-filtered through the theme's strict allowlist.
+ */
+function cyberpunk_filter_comment_text( $comment_text ) {
+    $allowed = array(
+        'a'          => array( 'href' => array(), 'title' => array(), 'rel' => array() ),
+        'b'          => array(),
+        'i'          => array(),
+        'em'         => array(),
+        'strong'     => array(),
+        'code'       => array(),
+        's'          => array(),
+        'del'        => array( 'datetime' => array() ),
+        'ins'        => array( 'datetime' => array() ),
+        'p'          => array(),
+        'br'         => array(),
+        'blockquote' => array( 'cite' => array() ),
+        'ul'         => array(),
+        'ol'         => array(),
+        'li'         => array(),
+    );
+    return wp_kses( $comment_text, $allowed );
+}
+add_filter( 'comment_text', 'cyberpunk_filter_comment_text', 20 );
+
+/**
+ * Restrict taxonomy term descriptions to safe inline HTML.
+ *
+ * The default wp_kses_allowed_html('post') allowlist used by
+ * the_archive_description() permits <iframe>, <object>, <embed>, and other
+ * tags that could be abused by a compromised admin to inject content.
+ * This filter applies a stricter allowlist before the description is stored.
+ *
+ * @param  string $description Raw term description.
+ * @return string              Filtered through a strict allowlist.
+ */
+function cyberpunk_filter_term_description( $description ) {
+    $allowed = array(
+        'a'      => array( 'href' => array(), 'title' => array(), 'rel' => array() ),
+        'b'      => array(),
+        'i'      => array(),
+        'em'     => array(),
+        'strong' => array(),
+        'p'      => array(),
+        'br'     => array(),
+        'span'   => array( 'class' => array() ),
+    );
+    return wp_kses( $description, $allowed );
+}
+add_filter( 'pre_term_description', 'cyberpunk_filter_term_description' );
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    SECTION 10 — UTILITY FUNCTIONS
