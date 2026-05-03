@@ -1,0 +1,202 @@
+/**
+ * CyberPunk Dark - Elementor Styles
+ *
+ * @package CyberPunk_Dark
+ */
+
+/* ── Elementor Section / Container ─────────────────────────────────────────── */
+.elementor-section.elementor-section-boxed > .elementor-container,
+.e-con-boxed > .e-con-inner {
+    max-width: 1280px;
+}
+
+/* ── Elementor Typography ───────────────────────────────────────────────────── */
+.elementor-widget-heading .elementor-heading-title {
+    font-family: 'Orbitron', monospace;
+    letter-spacing: 0.05em;
+}
+
+.elementor-widget-text-editor {
+    color: var(--cyber-text-secondary, #a0a0b0);
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 1rem;
+    line-height: 1.7;
+}
+
+/* ── Elementor Buttons ──────────────────────────────────────────────────────── */
+.elementor-button {
+    font-family: 'Exo 2', sans-serif !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.12em !important;
+    text-transform: uppercase !important;
+    border-radius: 0 !important;
+    clip-path: polygon(8px 0%, 100% 0%, calc(100% - 8px) 100%, 0% 100%);
+    transition: all 0.3s ease !important;
+    position: relative;
+    overflow: hidden;
+}
+
+.elementor-button::before {
+    content: '';
+    position: absolute;
+    top: 0; left: -100%;
+    width: 100%; height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+    transition: left 0.5s ease;
+}
+
+.elementor-button:hover::before { left: 100%; }
+
+.elementor-button:hover {
+    box-shadow: 0 0 20px rgba(0, 245, 255, 0.4) !important;
+}
+
+/* ── Elementor Image ────────────────────────────────────────────────────────── */
+.elementor-widget-image img {
+    border: 1px solid rgba(0, 245, 255, 0.2);
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.elementor-widget-image img:hover {
+    border-color: rgba(0, 245, 255, 0.6);
+    box-shadow: 0 0 20px rgba(0, 245, 255, 0.2);
+}
+
+/* ── Elementor Divider ──────────────────────────────────────────────────────── */
+.elementor-widget-divider .elementor-divider-separator {
+    border-color: rgba(0, 245, 255, 0.3) !important;
+}
+
+/* ── Elementor Icon Box ─────────────────────────────────────────────────────── */
+.elementor-widget-icon-box .elementor-icon {
+    transition: all 0.3s ease;
+}
+
+.elementor-widget-icon-box:hover .elementor-icon {
+    filter: drop-shadow(0 0 8px var(--cyber-neon-primary, #00f5ff));
+}
+
+/* ── Elementor Counter ──────────────────────────────────────────────────────── */
+.elementor-widget-counter .elementor-counter-number-wrapper {
+    font-family: 'Orbitron', monospace;
+    color: var(--cyber-neon-primary, #00f5ff);
+}
+
+/* ── Elementor Progress Bar ─────────────────────────────────────────────────── */
+.elementor-widget-progress .elementor-progress-wrapper {
+    background: rgba(0, 245, 255, 0.1);
+    border-radius: 0;
+}
+
+.elementor-widget-progress .elementor-progress-bar {
+    background: linear-gradient(90deg, var(--cyber-neon-primary, #00f5ff), var(--cyber-neon-secondary, #ff00ff));
+    border-radius: 0;
+    box-shadow: 0 0 10px rgba(0, 245, 255, 0.4);
+}
+
+/* ── Elementor Testimonial ──────────────────────────────────────────────────── */
+.elementor-widget-testimonial .elementor-testimonial-content {
+    font-style: italic;
+    color: var(--cyber-text-secondary, #a0a0b0);
+    border-left: 3px solid var(--cyber-neon-secondary, #ff00ff);
+    padding-left: 1rem;
+}
+
+/* ── Elementor Tabs ─────────────────────────────────────────────────────────── */
+.elementor-widget-tabs .elementor-tab-title {
+    font-family: 'Exo 2', sans-serif;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 0.8rem;
+    border-radius: 0 !important;
+    border-bottom: 2px solid transparent;
+    transition: all 0.3s ease;
+}
+
+.elementor-widget-tabs .elementor-tab-title.elementor-active {
+    border-bottom-color: var(--cyber-neon-primary, #00f5ff) !important;
+    color: var(--cyber-neon-primary, #00f5ff) !important;
+}
+
+/* ── Elementor Accordion ────────────────────────────────────────────────────── */
+.elementor-widget-accordion .elementor-accordion-item {
+    border: 1px solid rgba(0, 245, 255, 0.15) !important;
+    margin-bottom: 4px;
+}
+
+.elementor-widget-accordion .elementor-tab-title {
+    font-family: 'Exo 2', sans-serif;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+}
+
+.elementor-widget-accordion .elementor-tab-title.elementor-active {
+    color: var(--cyber-neon-primary, #00f5ff) !important;
+    background: rgba(0, 245, 255, 0.05) !important;
+}
+
+/* ── Elementor Form ─────────────────────────────────────────────────────────── */
+.elementor-form .elementor-field-group .elementor-field {
+    background: rgba(0, 245, 255, 0.03) !important;
+    border: 1px solid rgba(0, 245, 255, 0.2) !important;
+    color: #e0e0e0 !important;
+    border-radius: 0 !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease !important;
+}
+
+.elementor-form .elementor-field-group .elementor-field:focus {
+    border-color: var(--cyber-neon-primary, #00f5ff) !important;
+    box-shadow: 0 0 10px rgba(0, 245, 255, 0.2) !important;
+    outline: none !important;
+}
+
+.elementor-form .elementor-field-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.75rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--cyber-neon-primary, #00f5ff) !important;
+}
+
+/* ── Elementor Posts Widget ─────────────────────────────────────────────────── */
+.elementor-posts .elementor-post {
+    background: #1a1a2e;
+    border: 1px solid rgba(0, 245, 255, 0.08);
+    transition: all 0.3s ease;
+}
+
+.elementor-posts .elementor-post:hover {
+    border-color: rgba(0, 245, 255, 0.3);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 6px rgba(0, 245, 255, 0.4);
+    transform: translateY(-4px);
+}
+
+.elementor-posts .elementor-post__title a {
+    font-family: 'Orbitron', monospace;
+    color: #e0e0e0;
+    transition: color 0.15s ease;
+}
+
+.elementor-posts .elementor-post__title a:hover {
+    color: var(--cyber-neon-primary, #00f5ff);
+}
+
+/* ── Elementor Section backgrounds ─────────────────────────────────────────── */
+.elementor-section.cyber-section-dark {
+    background-color: #0a0a0f;
+}
+
+.elementor-section.cyber-section-surface {
+    background-color: #12121a;
+}
+
+.elementor-section.cyber-section-card {
+    background-color: #1a1a2e;
+}
+
+/* ── Elementor Canvas / Full Width ─────────────────────────────────────────── */
+.elementor-template-canvas {
+    background-color: #0a0a0f;
+}

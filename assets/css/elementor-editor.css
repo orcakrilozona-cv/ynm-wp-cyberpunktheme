@@ -1,0 +1,33 @@
+/**
+ * CyberPunk Dark - Elementor Editor Panel Styles
+ *
+ * @package CyberPunk_Dark
+ */
+
+/* Elementor editor panel branding */
+#elementor-panel .elementor-panel-header {
+    background: #0a0a0f;
+    border-bottom: 1px solid rgba(0, 245, 255, 0.2);
+}
+
+#elementor-panel .elementor-panel-header-title {
+    font-family: 'Orbitron', monospace;
+    color: #00f5ff;
+    letter-spacing: 0.1em;
+    font-size: 0.85rem;
+}
+
+/* Widget categories */
+#elementor-panel .elementor-panel-category-title {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: #606070;
+}
+
+/* Widget items */
+#elementor-panel .elementor-element-wrapper .elementor-element-title {
+    font-family: 'Exo 2', sans-serif;
+    font-size: 0.75rem;
+}

@@ -1,0 +1,93 @@
+/**
+ * CyberPunk Dark - Block Editor Styles
+ *
+ * @package CyberPunk_Dark
+ */
+
+body {
+    background-color: #0a0a0f;
+    color: #e0e0e0;
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 1rem;
+    line-height: 1.7;
+}
+
+.editor-styles-wrapper {
+    background-color: #0a0a0f;
+    color: #e0e0e0;
+}
+
+.editor-styles-wrapper h1,
+.editor-styles-wrapper h2,
+.editor-styles-wrapper h3,
+.editor-styles-wrapper h4,
+.editor-styles-wrapper h5,
+.editor-styles-wrapper h6 {
+    font-family: 'Orbitron', monospace;
+    color: #e0e0e0;
+    letter-spacing: 0.05em;
+}
+
+.editor-styles-wrapper h2 { color: #00f5ff; }
+
+.editor-styles-wrapper a {
+    color: #00f5ff;
+    text-decoration: none;
+}
+
+.editor-styles-wrapper a:hover { color: #ff00ff; }
+
+.editor-styles-wrapper code {
+    background: rgba(0, 245, 255, 0.08);
+    border: 1px solid rgba(0, 245, 255, 0.2);
+    padding: 0.1em 0.4em;
+    color: #00f5ff;
+    font-family: 'Share Tech Mono', monospace;
+}
+
+.editor-styles-wrapper pre {
+    background: #12121a;
+    border: 1px solid rgba(0, 245, 255, 0.2);
+    border-left: 3px solid #00f5ff;
+    padding: 1.5rem;
+    font-family: 'Share Tech Mono', monospace;
+    color: #00ff41;
+}
+
+.editor-styles-wrapper blockquote {
+    border-left: 3px solid #ff00ff;
+    padding: 1rem 1.5rem;
+    background: rgba(255, 0, 255, 0.05);
+    font-style: italic;
+    color: #a0a0b0;
+}
+
+.editor-styles-wrapper hr {
+    border: none;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #00f5ff, transparent);
+}
+
+.editor-styles-wrapper table th {
+    background: #12121a;
+    color: #00f5ff;
+    font-family: 'Orbitron', monospace;
+    font-size: 0.8rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+}
+
+.editor-styles-wrapper table td,
+.editor-styles-wrapper table th {
+    border: 1px solid rgba(0, 245, 255, 0.2);
+    padding: 0.5rem 1rem;
+}
+
+/* Block colors */
+.has-neon-cyan-color    { color: #00f5ff !important; }
+.has-neon-magenta-color { color: #ff00ff !important; }
+.has-neon-yellow-color  { color: #f5ff00 !important; }
+.has-neon-green-color   { color: #00ff41 !important; }
+.has-dark-bg-background-color    { background-color: #0a0a0f !important; }
+.has-dark-surface-background-color { background-color: #12121a !important; }
+.has-dark-card-background-color  { background-color: #1a1a2e !important; }
