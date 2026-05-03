@@ -176,8 +176,23 @@ function cyberpunk_sanitize_checkbox( $checked ) {
 }
 
 /**
- * Output customizer CSS as inline styles
+ * Sanitize a hex color with a mandatory fallback.
+ *
+ * sanitize_hex_color() returns '' (empty string) for invalid input, which
+ * would produce broken CSS like `--cyber-neon-primary: ;` and could be
+ * exploited to inject a CSS value by storing a crafted theme mod before
+ * the sanitize_callback fires (e.g. via direct DB manipulation or a race).
+ * This wrapper enforces a safe default so the CSS property is always valid.
+ *
+ * @param  string $value    Raw color value from get_theme_mod().
+ * @param  string $fallback Safe hex color to use if $value is invalid.
+ * @return string           Valid hex color string.
  */
+function cyberpunk_sanitize_hex_color_with_fallback( $value, $fallback ) {
+    $sanitized = sanitize_hex_color( $value );
+    return ( '' !== $sanitized && null !== $sanitized ) ? $sanitized : $fallback;
+}
+
 function cyberpunk_customizer_css() {
     $neon_primary   = get_theme_mod( 'cyberpunk_neon_primary',   '#00f5ff' );
     $neon_secondary = get_theme_mod( 'cyberpunk_neon_secondary', '#ff00ff' );
@@ -187,12 +202,14 @@ function cyberpunk_customizer_css() {
     $scanlines      = get_theme_mod( 'cyberpunk_scanlines',      true );
     $header_blur    = get_theme_mod( 'cyberpunk_header_blur',    true );
 
+    // FIX: Use wrapper that enforces fallback — sanitize_hex_color() alone
+    // returns '' on invalid input, which produces broken/injectable CSS.
     $css = ':root {';
-    $css .= '--cyber-neon-primary: '   . sanitize_hex_color( $neon_primary )   . ';';
-    $css .= '--cyber-neon-secondary: ' . sanitize_hex_color( $neon_secondary ) . ';';
-    $css .= '--cyber-neon-tertiary: '  . sanitize_hex_color( $neon_tertiary )  . ';';
-    $css .= '--cyber-bg-primary: '     . sanitize_hex_color( $bg_primary )     . ';';
-    $css .= '--cyber-bg-surface: '     . sanitize_hex_color( $bg_surface )     . ';';
+    $css .= '--cyber-neon-primary: '   . cyberpunk_sanitize_hex_color_with_fallback( $neon_primary,   '#00f5ff' ) . ';';
+    $css .= '--cyber-neon-secondary: ' . cyberpunk_sanitize_hex_color_with_fallback( $neon_secondary, '#ff00ff' ) . ';';
+    $css .= '--cyber-neon-tertiary: '  . cyberpunk_sanitize_hex_color_with_fallback( $neon_tertiary,  '#f5ff00' ) . ';';
+    $css .= '--cyber-bg-primary: '     . cyberpunk_sanitize_hex_color_with_fallback( $bg_primary,     '#0a0a0f' ) . ';';
+    $css .= '--cyber-bg-surface: '     . cyberpunk_sanitize_hex_color_with_fallback( $bg_surface,     '#12121a' ) . ';';
     $css .= '}';
 
     if ( ! $scanlines ) {

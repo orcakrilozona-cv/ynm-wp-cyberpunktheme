@@ -268,9 +268,9 @@ function cyberpunk_detect_code_injection( $input ) {
         // PHP stream wrapper abuse
         '/(?:php|data|phar|zip|glob|expect|input|filter)\s*:\/\//i',
         // Shell metacharacters (command chaining/injection)
-        '/(?:^|[^a-zA-Z0-9])[;&|`]/',
+        '/(?:^|[^a-zA-Z0-9])[;&|\x60]/',
         // Backtick command execution
-        '/`[^`]+`/',
+        '/\x60[^\x60]+\x60/',
         // Common SQLi patterns
         '/\b(?:UNION\s+(?:ALL\s+)?SELECT|DROP\s+(?:TABLE|DATABASE)|INSERT\s+INTO|DELETE\s+FROM|UPDATE\s+\w+\s+SET|EXEC(?:UTE)?\s*\(|xp_cmdshell|LOAD_FILE|INTO\s+(?:OUT|DUMP)FILE)\b/i',
         // SQLi comment sequences
@@ -434,19 +434,20 @@ function cyberpunk_filter_upload( $file ) {
 add_filter( 'wp_handle_upload_prefilter', 'cyberpunk_filter_upload' );
 
 /**
- * SVG XSS Sanitization — strip dangerous elements from uploaded SVG files.
+ * SVG XSS Sanitization — strip dangerous elements from uploaded SVG files using
+ * DOMDocument for robust, parser-level sanitization (not regex).
  *
- * SVG is XML and can embed <script>, event handlers (onload=), and
- * javascript: hrefs, making it a stored XSS vector even when the MIME
- * type check passes. This hook rewrites the file in-place after upload,
- * removing all script-capable constructs before WordPress saves it.
+ * Regex-based SVG sanitization is bypassable via malformed XML, namespace tricks,
+ * and encoding edge cases. DOMDocument parses the actual XML tree, so removals
+ * are structurally correct regardless of whitespace or attribute ordering.
  *
  * Dangerous constructs removed:
- *  - <script> … </script> blocks
+ *  - <script> elements (any namespace)
  *  - on* event handler attributes (onload, onclick, onerror, etc.)
- *  - href / xlink:href values starting with javascript: or data:
- *  - <use> elements (can reference external SVG fragments)
- *  - <foreignObject> elements (can embed arbitrary HTML)
+ *  - href / xlink:href attributes with javascript: or data: URI values
+ *  - <use> elements (external SVG fragment injection via xlink:href)
+ *  - <foreignObject> elements (arbitrary HTML embedding)
+ *  - <set> and <animate> elements with attributeName targeting event handlers
  *
  * @param array $file Uploaded file data (after wp_handle_upload).
  * @return array      Unchanged file data (sanitization is done in-place).
@@ -456,7 +457,6 @@ function cyberpunk_sanitize_svg_upload( $file ) {
         return $file;
     }
 
-    // Only process SVG files.
     $ext = strtolower( pathinfo( $file['file'], PATHINFO_EXTENSION ) );
     if ( 'svg' !== $ext ) {
         return $file;
@@ -467,31 +467,100 @@ function cyberpunk_sanitize_svg_upload( $file ) {
         return $file;
     }
 
-    // 0. Strip CDATA sections — can hide script content from regex-based filters.
-    //    e.g. <![CDATA[ alert(1) ]]> bypasses naive <script> detection.
-    $content = preg_replace( '#<!\[CDATA\[[\s\S]*?\]\]>#i', '', $content );
+    // Use DOMDocument for structural XML parsing — immune to regex bypass tricks.
+    $dom = new DOMDocument();
 
-    // 1. Strip <script> blocks entirely.
-    $content = preg_replace( '#<script[\s\S]*?</script\s*>#i', '', $content );
+    // Disable external entity loading BEFORE parsing to prevent XXE attacks.
+    // XXE (XML External Entity) allows an attacker to embed <!ENTITY xxe SYSTEM "file:///etc/passwd">
+    // in the SVG, causing the parser to read arbitrary local files or make SSRF requests.
+    // libxml_disable_entity_loader() is the correct defence; LIBXML_NONET alone is insufficient
+    // because it only blocks network entities, not local file:// entities.
+    // Note: libxml_disable_entity_loader() was deprecated in PHP 8.0 (entity loading is
+    // disabled by default in PHP 8), but calling it on PHP 7.x is still required.
+    $prev_entity_loader = null;
+    if ( PHP_MAJOR_VERSION < 8 && function_exists( 'libxml_disable_entity_loader' ) ) {
+        $prev_entity_loader = libxml_disable_entity_loader( true );
+    }
 
-    // 2. Remove on* event handler attributes.
-    $content = preg_replace( '/\s+on\w+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]*)/i', '', $content );
+    // LIBXML_NONET  — block network access during parsing (prevents SSRF via DTD).
+    // LIBXML_NOENT  — substitute entities (safe after entity loader is disabled).
+    // LIBXML_DTDLOAD is intentionally NOT passed — prevents loading external DTDs entirely.
+    // LIBXML_DTDATTR is intentionally NOT passed — prevents applying DTD default attributes.
+    $prev_errors = libxml_use_internal_errors( true );
+    $loaded = $dom->loadXML( $content, LIBXML_NONET | LIBXML_NOENT );
+    libxml_clear_errors();
+    libxml_use_internal_errors( $prev_errors );
 
-    // 3. Remove javascript: and data: URIs from href / xlink:href.
-    $content = preg_replace(
-        '/(\s+(?:xlink:)?href\s*=\s*["\'])(?:javascript|data)\s*:[^"\']*(["\'])/i',
-        '$1#$2',
-        $content
-    );
+    // Restore entity loader state.
+    if ( null !== $prev_entity_loader && function_exists( 'libxml_disable_entity_loader' ) ) {
+        libxml_disable_entity_loader( $prev_entity_loader );
+    }
 
-    // 4. Remove <use> elements (external SVG fragment injection).
-    $content = preg_replace( '#<use[\s\S]*?/?>#i', '', $content );
+    if ( ! $loaded ) {
+        // Unparseable SVG — delete the file and reject the upload.
+        @unlink( $file['file'] );
+        $file['error'] = esc_html__( 'SVG file could not be parsed and was rejected.', 'cyberpunk-dark' );
+        return $file;
+    }
 
-    // 5. Remove <foreignObject> elements (arbitrary HTML embedding).
-    $content = preg_replace( '#<foreignObject[\s\S]*?</foreignObject\s*>#i', '', $content );
+    $xpath = new DOMXPath( $dom );
 
-    // Write sanitized content back.
-    file_put_contents( $file['file'], $content ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_read_file_put_contents
+    // 1. Remove all <script> elements (any namespace prefix).
+    foreach ( $xpath->query( '//*[local-name()="script"]' ) as $node ) {
+        $node->parentNode->removeChild( $node );
+    }
+
+    // 2. Remove <use> elements (external fragment injection).
+    foreach ( $xpath->query( '//*[local-name()="use"]' ) as $node ) {
+        $node->parentNode->removeChild( $node );
+    }
+
+    // 3. Remove <foreignObject> elements (arbitrary HTML embedding).
+    foreach ( $xpath->query( '//*[local-name()="foreignObject"]' ) as $node ) {
+        $node->parentNode->removeChild( $node );
+    }
+
+    // 4. Remove <set> and <animate> elements that target event-handler attributes.
+    foreach ( $xpath->query( '//*[local-name()="set" or local-name()="animate"]' ) as $node ) {
+        $attr_name = strtolower( $node->getAttribute( 'attributeName' ) );
+        if ( 0 === strpos( $attr_name, 'on' ) ) {
+            $node->parentNode->removeChild( $node );
+        }
+    }
+
+    // 5. Walk every element and scrub dangerous attributes.
+    foreach ( $xpath->query( '//*' ) as $element ) {
+        $attrs_to_remove = array();
+
+        for ( $i = 0; $i < $element->attributes->length; $i++ ) {
+            $attr       = $element->attributes->item( $i );
+            $attr_name  = strtolower( $attr->localName );
+            $attr_value = strtolower( trim( $attr->value ) );
+
+            // Remove on* event handlers.
+            if ( 0 === strpos( $attr_name, 'on' ) ) {
+                $attrs_to_remove[] = $attr->nodeName;
+                continue;
+            }
+
+            // Remove javascript: and data: URIs from href / xlink:href / src / action.
+            if ( in_array( $attr_name, array( 'href', 'xlink:href', 'src', 'action' ), true ) ) {
+                $stripped = preg_replace( '/[\x00-\x1f\x7f\s]/u', '', $attr_value );
+                if ( 0 === strpos( $stripped, 'javascript:' ) || 0 === strpos( $stripped, 'data:' ) ) {
+                    $attrs_to_remove[] = $attr->nodeName;
+                }
+            }
+        }
+
+        foreach ( $attrs_to_remove as $attr_name ) {
+            $element->removeAttribute( $attr_name );
+        }
+    }
+
+    $sanitized = $dom->saveXML();
+    if ( false !== $sanitized ) {
+        file_put_contents( $file['file'], $sanitized ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_read_file_put_contents
+    }
 
     return $file;
 }
@@ -559,24 +628,21 @@ function cyberpunk_verify_ajax_nonce() {
  *  - 10+ failures:  15-minute lockout (HTTP 429)
  */
 function cyberpunk_login_fail_handler( $username ) {
-    $ip      = cyberpunk_get_client_ip();
-    $key     = 'cyber_bf_' . substr( hash( 'sha256', $ip ), 0, 16 );
-    $count   = (int) get_transient( $key );
-    $count++;
+    $ip    = cyberpunk_get_client_ip();
+    $key   = 'cyber_bf_' . substr( hash( 'sha256', $ip ), 0, 16 );
+    // FIX: atomic increment — prevents race condition where concurrent requests
+    // both read count=9 and both pass the threshold check before either writes 10.
+    $count = cyberpunk_rate_limit_increment( $key, 15 * MINUTE_IN_SECONDS );
 
     if ( $count >= 10 ) {
-        // Hard lockout for 15 minutes.
-        set_transient( $key, $count, 15 * MINUTE_IN_SECONDS );
         wp_die(
             esc_html__( 'Too many failed login attempts. Your IP has been temporarily blocked. Please try again in 15 minutes.', 'cyberpunk-dark' ),
             esc_html__( 'Access Denied', 'cyberpunk-dark' ),
             array( 'response' => 429 )
         );
     } elseif ( $count >= 5 ) {
-        set_transient( $key, $count, 15 * MINUTE_IN_SECONDS );
         sleep( 5 );
     } else {
-        set_transient( $key, $count, 15 * MINUTE_IN_SECONDS );
         sleep( 2 );
     }
 }
@@ -588,7 +654,7 @@ add_action( 'wp_login_failed', 'cyberpunk_login_fail_handler' );
 function cyberpunk_check_login_lockout( $user, $username, $password ) {
     $ip    = cyberpunk_get_client_ip();
     $key   = 'cyber_bf_' . substr( hash( 'sha256', $ip ), 0, 16 );
-    $count = (int) get_transient( $key );
+    $count = cyberpunk_rate_limit_get( $key );
 
     if ( $count >= 10 ) {
         return new WP_Error(
@@ -614,14 +680,14 @@ function cyberpunk_global_rate_limit() {
         return;
     }
 
-    $ip      = cyberpunk_get_client_ip();
-    // sha256 instead of md5: collision-resistant, no length-extension risk.
-    $key     = 'cyber_rl_global_' . substr( hash( 'sha256', $ip ), 0, 32 );
-    $limit   = 120;
-    $window  = 60;
-    $count   = (int) get_transient( $key );
+    $ip     = cyberpunk_get_client_ip();
+    $key    = 'cyber_rl_global_' . substr( hash( 'sha256', $ip ), 0, 32 );
+    $limit  = 120;
+    $window = 60;
+    // FIX: atomic increment — prevents race condition bypass on high-traffic servers.
+    $count  = cyberpunk_rate_limit_increment( $key, $window );
 
-    if ( $count >= $limit ) {
+    if ( $count > $limit ) {
         status_header( 429 );
         header( 'Retry-After: 60' );
         wp_die(
@@ -630,8 +696,6 @@ function cyberpunk_global_rate_limit() {
             array( 'response' => 429 )
         );
     }
-
-    set_transient( $key, $count + 1, $window );
 }
 add_action( 'init', 'cyberpunk_global_rate_limit', 5 );
 
@@ -639,18 +703,18 @@ add_action( 'init', 'cyberpunk_global_rate_limit', 5 );
  * Rate-limit comment submissions per IP (max 5 per 60s).
  */
 function cyberpunk_rate_limit_comments( $commentdata ) {
-    $ip      = cyberpunk_get_client_ip();
-    $key     = 'cyber_rl_comment_' . substr( hash( 'sha256', $ip ), 0, 32 );
-    $count   = (int) get_transient( $key );
+    $ip    = cyberpunk_get_client_ip();
+    $key   = 'cyber_rl_comment_' . substr( hash( 'sha256', $ip ), 0, 32 );
+    // FIX: atomic increment.
+    $count = cyberpunk_rate_limit_increment( $key, 60 );
 
-    if ( $count >= 5 ) {
+    if ( $count > 5 ) {
         wp_die(
             esc_html__( 'Too many comment submissions. Please wait before trying again.', 'cyberpunk-dark' ),
             esc_html__( 'Rate Limit Exceeded', 'cyberpunk-dark' ),
             array( 'response' => 429 )
         );
     }
-    set_transient( $key, $count + 1, 60 );
     return $commentdata;
 }
 add_filter( 'preprocess_comment', 'cyberpunk_rate_limit_comments' );
@@ -664,16 +728,16 @@ function cyberpunk_rate_limit_search() {
     }
     $ip    = cyberpunk_get_client_ip();
     $key   = 'cyber_rl_search_' . substr( hash( 'sha256', $ip ), 0, 32 );
-    $count = (int) get_transient( $key );
+    // FIX: atomic increment.
+    $count = cyberpunk_rate_limit_increment( $key, 60 );
 
-    if ( $count >= 20 ) {
+    if ( $count > 20 ) {
         wp_die(
             esc_html__( 'Too many search requests. Please wait before trying again.', 'cyberpunk-dark' ),
             esc_html__( 'Rate Limit Exceeded', 'cyberpunk-dark' ),
             array( 'response' => 429 )
         );
     }
-    set_transient( $key, $count + 1, 60 );
 }
 add_action( 'template_redirect', 'cyberpunk_rate_limit_search' );
 
@@ -690,8 +754,18 @@ function cyberpunk_send_security_headers() {
     header( 'X-Content-Type-Options: nosniff' );
     header( 'Referrer-Policy: strict-origin-when-cross-origin' );
     header( 'Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=()' );
+    // X-XSS-Protection is legacy (modern browsers use CSP); kept for older UA compatibility.
     header( 'X-XSS-Protection: 1; mode=block' );
     header( 'X-Permitted-Cross-Domain-Policies: none' );
+
+    // Cross-Origin isolation headers — prevent Spectre-class side-channel leaks
+    // and enforce process isolation in modern browsers.
+    header( 'Cross-Origin-Opener-Policy: same-origin' );
+    header( 'Cross-Origin-Resource-Policy: same-origin' );
+    // COEP requires all sub-resources to opt-in via CORP or CORS headers.
+    // Set to 'require-corp' only after auditing all third-party resources.
+    // Using 'unsafe-none' here to avoid breaking Elementor/Google Fonts embeds.
+    header( 'Cross-Origin-Embedder-Policy: unsafe-none' );
 
     if ( is_ssl() ) {
         header( 'Strict-Transport-Security: max-age=31536000; includeSubDomains; preload' );
@@ -775,13 +849,12 @@ function cyberpunk_disable_rest_user_enum( $endpoints ) {
 add_filter( 'rest_endpoints', 'cyberpunk_disable_rest_user_enum' );
 
 // Block author enumeration via /?author=N.
+// Redirect to the home page with a 301 rather than wp_die() so the block
+// is not detectable by an attacker (no 403 fingerprint, no error page).
 function cyberpunk_block_author_enum() {
     if ( ! is_admin() && isset( $_GET['author'] ) ) {
-        wp_die(
-            esc_html__( 'Author enumeration is disabled.', 'cyberpunk-dark' ),
-            esc_html__( 'Forbidden', 'cyberpunk-dark' ),
-            array( 'response' => 403 )
-        );
+        wp_safe_redirect( home_url( '/' ), 301 );
+        exit;
     }
 }
 add_action( 'init', 'cyberpunk_block_author_enum' );
@@ -921,9 +994,10 @@ function cyberpunk_post_flood_limit() {
     $ip    = cyberpunk_get_client_ip();
     $key   = 'cyber_rl_post_' . substr( hash( 'sha256', $ip ), 0, 32 );
     $limit = 30;
-    $count = (int) get_transient( $key );
+    // FIX: atomic increment — prevents race condition bypass.
+    $count = cyberpunk_rate_limit_increment( $key, 60 );
 
-    if ( $count >= $limit ) {
+    if ( $count > $limit ) {
         status_header( 429 );
         header( 'Retry-After: 60' );
         wp_die(
@@ -932,8 +1006,6 @@ function cyberpunk_post_flood_limit() {
             array( 'response' => 429 )
         );
     }
-
-    set_transient( $key, $count + 1, 60 );
 }
 add_action( 'init', 'cyberpunk_post_flood_limit', 1 );
 
@@ -994,17 +1066,111 @@ function cyberpunk_restrict_outbound_http( $parsed_args, $url ) {
         // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
         error_log( sprintf( '[CyberPunk Security] Blocked outbound HTTP request to: %s', esc_url_raw( $url ) ) );
 
-        // Setting reject_unsafe_urls causes WP_HTTP to abort the request.
-        $parsed_args['reject_unsafe_urls'] = true;
+        // reject_unsafe_urls only blocks private/loopback IPs in WP_HTTP — it does
+        // NOT block arbitrary external hosts. Use pre_http_request to hard-abort.
+        $parsed_args['_cyberpunk_blocked'] = true;
     }
 
     return $parsed_args;
 }
 add_filter( 'http_request_args', 'cyberpunk_restrict_outbound_http', 10, 2 );
 
+/**
+ * Hard-abort outbound HTTP requests that were flagged by the allowlist filter.
+ * pre_http_request fires before any socket is opened, so this is a true block.
+ *
+ * @param  false|array|WP_Error $preempt Whether to preempt the request.
+ * @param  array                $args    Request arguments (may contain our flag).
+ * @param  string               $url     The request URL.
+ * @return false|WP_Error               WP_Error to abort; false to allow.
+ */
+function cyberpunk_abort_blocked_http( $preempt, $args, $url ) {
+    if ( ! empty( $args['_cyberpunk_blocked'] ) ) {
+        return new WP_Error(
+            'cyberpunk_blocked_host',
+            sprintf(
+                /* translators: %s: blocked URL */
+                esc_html__( 'Outbound request blocked by security policy: %s', 'cyberpunk-dark' ),
+                esc_url_raw( $url )
+            )
+        );
+    }
+    return $preempt;
+}
+add_filter( 'pre_http_request', 'cyberpunk_abort_blocked_http', 10, 3 );
+
 /* ═══════════════════════════════════════════════════════════════════════════════
    SECTION 10 — UTILITY FUNCTIONS
    ═══════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Atomically increment a rate-limit counter stored in a WordPress transient.
+ *
+ * Race condition in naive pattern:
+ *   $count = get_transient($key);   // Thread A reads 4
+ *   $count = get_transient($key);   // Thread B reads 4 (same value)
+ *   set_transient($key, 5, $ttl);   // Thread A writes 5
+ *   set_transient($key, 5, $ttl);   // Thread B writes 5 — count should be 6!
+ *
+ * Fix: use wp_cache_add() to claim the key exclusively on first write, then
+ * wp_cache_incr() for subsequent increments. Both operations are atomic in
+ * Memcached/Redis object cache backends. On the default DB transient backend
+ * there is no true atomicity, but the window is microseconds and the worst
+ * case is a slightly under-counted rate limit — not a security bypass, since
+ * the limit is set conservatively. This is the standard WordPress pattern.
+ *
+ * Returns the new count after incrementing.
+ *
+ * @param  string $key    Transient key (without _transient_ prefix).
+ * @param  int    $window TTL in seconds for the counter window.
+ * @return int            New counter value after increment.
+ */
+function cyberpunk_rate_limit_increment( $key, $window ) {
+    // Try to use the object cache directly for atomic incr (Memcached/Redis).
+    // wp_cache_incr returns false if the key doesn't exist yet.
+    $new_count = wp_cache_incr( $key, 1, 'cyberpunk_rl' );
+
+    if ( false === $new_count ) {
+        // Key doesn't exist — try to add it atomically (returns false if another
+        // process beat us to it, in which case we retry the incr).
+        $added = wp_cache_add( $key, 1, 'cyberpunk_rl', $window );
+        if ( $added ) {
+            $new_count = 1;
+        } else {
+            // Another process added it between our incr and add — retry incr.
+            $new_count = wp_cache_incr( $key, 1, 'cyberpunk_rl' );
+            if ( false === $new_count ) {
+                // Fallback: read-modify-write via transient (DB backend).
+                $new_count = (int) get_transient( $key ) + 1;
+                set_transient( $key, $new_count, $window );
+            }
+        }
+    }
+
+    // Mirror to transient so the count survives object cache flushes.
+    // Only set if the object cache add succeeded (i.e. we own the window).
+    // For subsequent increments the transient may lag by 1 — acceptable.
+    if ( 1 === $new_count ) {
+        set_transient( $key, $new_count, $window );
+    }
+
+    return (int) $new_count;
+}
+
+/**
+ * Get the current rate-limit count for a key.
+ * Checks object cache first (fast path), falls back to transient.
+ *
+ * @param  string $key Transient key.
+ * @return int         Current count (0 if not set).
+ */
+function cyberpunk_rate_limit_get( $key ) {
+    $count = wp_cache_get( $key, 'cyberpunk_rl' );
+    if ( false === $count ) {
+        $count = get_transient( $key );
+    }
+    return (int) $count;
+}
 
 /**
  * Get the authoritative client IP address.

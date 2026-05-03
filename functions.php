@@ -3,7 +3,7 @@
  * CyberPunk Dark Theme Functions
  *
  * @package CyberPunk_Dark
- * @version 1.0.3
+ * @version 1.0.4
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 // Theme version
-define( 'CYBERPUNK_VERSION', '1.0.3' );
+define( 'CYBERPUNK_VERSION', '1.0.4' );
 define( 'CYBERPUNK_DIR', get_template_directory() );
 define( 'CYBERPUNK_URI', get_template_directory_uri() );
 

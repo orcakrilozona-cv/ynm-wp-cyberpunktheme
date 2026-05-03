@@ -41,6 +41,15 @@ Options -Indexes
     Header always set X-Permitted-Cross-Domain-Policies "none"
     Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=()"
 
+    # Cross-Origin isolation headers — mirror the PHP-level headers in inc/security.php.
+    # COOP prevents cross-origin window references (opener attacks).
+    Header always set Cross-Origin-Opener-Policy "same-origin"
+    # CORP prevents other origins from loading this site's resources.
+    Header always set Cross-Origin-Resource-Policy "same-origin"
+    # COEP set to unsafe-none to avoid breaking Elementor/Google Fonts embeds.
+    # Change to 'require-corp' once all third-party sub-resources opt in via CORP/CORS.
+    Header always set Cross-Origin-Embedder-Policy "unsafe-none"
+
     # HSTS — enforces HTTPS for 1 year including subdomains.
     # Only active when the request arrives over HTTPS (env var set by mod_ssl).
     # Remove the condition and keep the bare Header directive only after you have
@@ -54,4 +63,12 @@ Options -Indexes
 </IfModule>
 
 # ── Disable server signature ──────────────────────────────────────────────────
-ServerSignature Off
+# NOTE: ServerSignature and ServerTokens are server-level directives and cannot
+# be set in .htaccess. Configure them in your Apache server config or vhost:
+#
+#   ServerSignature Off
+#   ServerTokens Prod
+#
+# ServerTokens Prod limits the Server: response header to "Apache" only,
+# preventing version disclosure. ServerSignature Off removes the server
+# footer from error pages. Both must be set in httpd.conf or a vhost conf.

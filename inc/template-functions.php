@@ -110,19 +110,23 @@ add_action( 'wp_head', 'cyberpunk_preload_assets', 1 );
  */
 function cyberpunk_schema_markup() {
     if ( is_single() ) {
+        // FIX: All string values sanitized with sanitize_text_field() before
+        // encoding. wp_json_encode with JSON_HEX_TAG already prevents </script>
+        // injection, but sanitizing the source values is defense-in-depth and
+        // ensures no raw HTML entities or control characters leak into the JSON.
         $schema = array(
-            '@context'  => 'https://schema.org',
-            '@type'     => 'BlogPosting',
-            'headline'  => get_the_title(),
-            'datePublished' => get_the_date( 'c' ),
-            'dateModified'  => get_the_modified_date( 'c' ),
-            'author'    => array(
+            '@context'      => 'https://schema.org',
+            '@type'         => 'BlogPosting',
+            'headline'      => sanitize_text_field( get_the_title() ),
+            'datePublished' => esc_attr( get_the_date( 'c' ) ),
+            'dateModified'  => esc_attr( get_the_modified_date( 'c' ) ),
+            'author'        => array(
                 '@type' => 'Person',
-                'name'  => get_the_author(),
+                'name'  => sanitize_text_field( get_the_author() ),
             ),
-            'publisher' => array(
+            'publisher'     => array(
                 '@type' => 'Organization',
-                'name'  => get_bloginfo( 'name' ),
+                'name'  => sanitize_text_field( get_bloginfo( 'name' ) ),
             ),
         );
         // JSON_HEX_TAG encodes < and > as \u003C / \u003E, preventing </script>

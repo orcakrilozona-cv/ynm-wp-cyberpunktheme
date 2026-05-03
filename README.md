@@ -3,7 +3,7 @@
 > A dark, futuristic WordPress theme with full Elementor compatibility and serious security hardening built in.
 
 **Author:** [Yan Naing Myint](https://yannaing.pro)  
-**Version:** 1.0.3  
+**Version:** 1.0.4  
 **License:** [WTFPL](http://www.wtfpl.net/about/)  
 **Requires WordPress:** 5.8+  
 **Requires PHP:** 7.4+  
@@ -147,7 +147,7 @@ cyberpunk-dark/
 
 ## Installation
 
-1. Download `ynm-wp-cyberpunktheme-1.0.3.zip`
+1. Download `ynm-wp-cyberpunktheme-1.0.4.zip`
 2. In WordPress admin, go to **Appearance → Themes → Add New → Upload Theme**
 3. Upload the zip and click **Install Now**
 4. Activate **YNM-WP-CyberPunkTheme**
@@ -197,6 +197,54 @@ Add `data-typewriter="Your Text"` to any HTML element. Optional attributes:
 ---
 
 ## Changelog
+
+### 1.0.4 — Deep Evasion Audit & Atomic Rate Limiting
+
+**CSS Custom Property Injection fix (`assets/js/customizer.js`):**
+- Added `sanitizeHexColor()` validator — strict regex allowlist (`#RGB`, `#RRGGBB`, `#RGBA`, `#RRGGBBAA` only) applied to all 5 color bindings before `style.setProperty()` — prevents CSS injection via crafted customizer values
+
+**Customizer CSS injection fix (`inc/customizer.php`):**
+- Added `cyberpunk_sanitize_hex_color_with_fallback()` wrapper — `sanitize_hex_color()` returns `''` on invalid input, which would produce broken/injectable CSS like `--cyber-neon-primary: ;`; wrapper enforces safe defaults for all 5 CSS custom properties
+
+**SVG XXE (XML External Entity) prevention (`inc/security.php`):**
+- Replaced regex-based SVG sanitizer with `DOMDocument` + `DOMXPath` parser-level sanitization — immune to namespace tricks, malformed XML, and encoding bypass
+- Added `libxml_disable_entity_loader(true)` before parsing on PHP 7.x — prevents `<!ENTITY xxe SYSTEM "file:///etc/passwd">` local file read attacks
+- `LIBXML_DTDLOAD` and `LIBXML_DTDATTR` intentionally NOT passed — prevents external DTD loading entirely
+- Unparseable SVGs are now deleted from disk and rejected
+
+**Transient race condition fix — all 6 rate limiters (`inc/security.php`):**
+- Added `cyberpunk_rate_limit_increment()` — atomic increment using `wp_cache_incr()` (atomic on Memcached/Redis) with `wp_cache_add()` for first-write exclusivity and DB transient fallback
+- Added `cyberpunk_rate_limit_get()` — object cache fast-path with transient fallback
+- All 6 rate limiters wired to atomic helpers: login fail handler, login lockout check, global HTTP limiter, comment limiter, search limiter, POST flood limiter
+- Eliminates TOCTOU race where concurrent requests both read count=N and both pass the threshold before either writes N+1
+
+**Author enumeration block (`inc/security.php`):**
+- Changed `wp_die()` 403 to `wp_safe_redirect(home_url('/'), 301)` — silent redirect prevents fingerprinting the block via HTTP status code
+
+**Outbound HTTP block fix (`inc/security.php`):**
+- `reject_unsafe_urls` only blocks private/loopback IPs in WP_HTTP, not arbitrary external hosts
+- Added `cyberpunk_abort_blocked_http()` on `pre_http_request` hook — fires before any socket is opened, returns `WP_Error` to hard-abort non-allowlisted requests
+
+**Cross-Origin isolation headers (`inc/security.php` + `.htaccess`):**
+- Added `Cross-Origin-Opener-Policy: same-origin` — prevents cross-origin window references (opener attacks)
+- Added `Cross-Origin-Resource-Policy: same-origin` — prevents other origins from loading this site's resources
+- Added `Cross-Origin-Embedder-Policy: unsafe-none` — set to unsafe-none to preserve Elementor/Google Fonts compatibility
+- Mirrored at both PHP and Apache layers
+
+**Schema markup hardening (`inc/template-functions.php`):**
+- Added `sanitize_text_field()` on all string values before `wp_json_encode()` — defense-in-depth against HTML entities and control characters in JSON-LD output
+
+**404 double-encoding fix (`404.php`):**
+- Removed redundant `cyberpunk_sanitize_input()` wrapper around `$_SERVER['REQUEST_URI']` — `cyberpunk_sanitize_input()` already calls `htmlspecialchars()` internally, so wrapping in `esc_html()` caused double-encoding (`&amp;amp;`)
+
+**Footer HTML safety (`footer.php`):**
+- WordPress link in `printf()` now passed through `wp_kses()` with explicit allowlist
+
+**`.htaccess` fix:**
+- Removed invalid `ServerSignature Off` directive (server-level only, silently ignored in `.htaccess`)
+- Added explanatory comment directing to `httpd.conf` with `ServerTokens Prod`
+
+---
 
 ### 1.0.3 — Deep Evasion-Resistance & Extended Hardening
 

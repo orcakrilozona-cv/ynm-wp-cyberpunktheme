@@ -47,10 +47,25 @@
                         <span class="cyber-footer-sep" aria-hidden="true"> // </span>
                         <span class="cyber-footer-credit">
                             <?php
+                            // FIX: The <a> tag is passed through wp_kses() to prevent
+                            // any future modification of this string from introducing
+                            // unsanitized HTML. The href is a hardcoded trusted URL.
                             printf(
                                 /* translators: %s: WordPress link */
-                                esc_html__( 'Powered by %s', 'cyberpunk-dark' ),
-                                '<a href="https://wordpress.org" target="_blank" rel="noopener noreferrer">WordPress</a>'
+                                wp_kses(
+                                    __( 'Powered by %s', 'cyberpunk-dark' ),
+                                    array()
+                                ),
+                                wp_kses(
+                                    '<a href="https://wordpress.org" target="_blank" rel="noopener noreferrer">WordPress</a>',
+                                    array(
+                                        'a' => array(
+                                            'href'   => array(),
+                                            'target' => array(),
+                                            'rel'    => array(),
+                                        ),
+                                    )
+                                )
                             );
                             ?>
                         </span>
